@@ -1,0 +1,456 @@
+    package com.mycompany.smppclient.session;
+
+    import com.mycompany.smppclient.pdu.*;
+    import com.mycompany.smppclient.pdu.decoder.PduDecoder;
+    import com.mycompany.smppclient.pdu.encoder.PduEncoder;
+    import com.mycompany.smppclient.socket.SmppSocketClient;
+    import org.apache.logging.log4j.LogManager;
+    import org.apache.logging.log4j.Logger;
+
+    import java.util.concurrent.*;
+    import java.util.concurrent.atomic.AtomicInteger;
+    import java.util.Arrays;
+
+
+    public class SmppSessionManager implements AutoCloseable {
+
+        private static final Logger log = LogManager.getLogger(SmppSessionManager.class);
+
+        private final SmppSocketClient socket;
+        private final SmppSessionConfig cfg;
+        private final PduEncoder encoder = new PduEncoder();
+        private final PduDecoder decoder = new PduDecoder();
+        private final PendingRequestRegistry pending = new PendingRequestRegistry();
+
+        private final AtomicInteger seqGen = new AtomicInteger(1);
+
+        private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        private volatile boolean bound = false;
+
+        private final AtomicInteger enquireOkCount = new AtomicInteger(0);
+
+        private final SmppSender sender;
+
+        private final IncomingMessageHandler incomingHandler;
+
+
+        private volatile long lastEnquireOkAtMs = 0;
+        private volatile BindTransceiverReq lastBindReq;
+        private volatile String lastHost;
+        private volatile int lastPort;
+
+        private com.mycompany.smppclient.db.SmppDao dao;
+        private String sessionId;
+        private String systemId;
+
+
+        public SmppSessionManager(SmppSocketClient socket, SmppSessionConfig cfg) {
+            this(socket, cfg, null);
+        }
+
+        public SmppSessionManager(SmppSocketClient socket, SmppSessionConfig cfg, IncomingMessageHandler handler) {
+            this(socket, cfg, handler, null, null, null); // <-- DB yok
+        }
+
+        public SmppSessionManager(
+                SmppSocketClient socket,
+                SmppSessionConfig cfg,
+                IncomingMessageHandler handler,
+                com.mycompany.smppclient.db.SmppDao dao,
+                String sessionId,
+                String systemId
+        ) {
+            this.socket = socket;
+            this.cfg = cfg;
+            this.incomingHandler = handler;
+
+            this.dao = null;
+            this.sessionId = null;
+            this.systemId = null;
+            this.sender = new SmppSender(socket, cfg, encoder, pending, seqGen);
+        }
+
+        public boolean isBound() { return bound; }
+
+        private int nextSeq() {
+            int v = seqGen.getAndIncrement();
+            if (v <= 0) {
+                seqGen.set(1);
+                v = seqGen.getAndIncrement();
+            }
+            return v;
+        }
+
+        public void onIncomingPduBytes(byte[] data) {
+            try {
+                Pdu pdu = decoder.decode(data);
+                log.debug("RX: {}", pdu);
+
+                if (pdu instanceof DeliverSmReq) {
+                    handleDeliverSm((DeliverSmReq) pdu);
+                    return;
+                }
+                if (pdu instanceof EnquireLinkReq) {
+                    EnquireLinkResp r = new EnquireLinkResp();
+                    r.setCommandStatus(0);
+                    r.setSequenceNumber(pdu.getSequenceNumber());
+                    socket.sendBytes(encoder.encode(r));
+                    log.info("[ENQUIRE] RX EnquireLinkReq -> TX EnquireLinkResp seq={}", pdu.getSequenceNumber());
+                    return;
+                }
+                if (pdu instanceof UnbindReq) {
+                    UnbindResp r = new UnbindResp();
+                    r.setCommandStatus(0);
+                    r.setSequenceNumber(pdu.getSequenceNumber());
+                    socket.sendBytes(encoder.encode(r));
+                    bound = false;
+                    log.info("[UNBIND] RX UnbindReq -> TX UnbindResp seq={}", pdu.getSequenceNumber());
+                    return;
+                }
+
+                boolean matched = pending.complete(pdu.getSequenceNumber(), pdu);
+                if (!matched) {
+                    log.info("[UNSOLICITED] RX {} seq={} status={}",
+                            pdu.getClass().getSimpleName(),
+                            pdu.getSequenceNumber(),
+                            pdu.getCommandStatus());
+                }
+
+            } catch (Exception e) {
+                //reader thread ölmmesi için
+                log.error("RX decode failed: {}", toHex(data), e);
+            }
+        }
+
+        private static String toHex(byte[] b) {
+            StringBuilder sb = new StringBuilder();
+            for (byte x : b) sb.append(String.format("%02X", x));
+            return sb.toString();
+        }
+
+        // ----------------- Bind ----------
+        public boolean bind(String host, int port, BindTransceiverReq req) throws Exception {
+            this.lastHost = host;
+            this.lastPort = port;
+            this.lastBindReq = req;
+
+            boolean ok = socket.connect(host, port);
+            if (!ok) return false;
+
+            socket.setOnPduBytes(this::onIncomingPduBytes);
+
+            boolean bindOk = doBindOnly(req);
+            bound = bindOk;
+            return bindOk;
+        }
+
+        private boolean doBindOnly(BindTransceiverReq req) throws Exception {
+            int seq = nextSeq();
+            req.setSequenceNumber(seq);
+            req.setCommandStatus(0);
+
+            CompletableFuture<Pdu> f = pending.register(seq);
+
+            socket.sendBytes(encoder.encode(req));
+
+            Pdu resp = f.get(cfg.getResponseTimeoutMs(), TimeUnit.MILLISECONDS);
+            if (!(resp instanceof BindTransceiverResp)) {
+                throw new IllegalStateException("Expected BindTransceiverResp but got: " + resp.getClass().getSimpleName());
+            }
+
+            return resp.getCommandStatus() == 0;
+        }
+
+        private static BindTransceiverReq copyBind(BindTransceiverReq src) {
+            BindTransceiverReq r = new BindTransceiverReq();
+            r.setSystemId(src.getSystemId());
+            r.setPassword(src.getPassword());
+            r.setSystemType(src.getSystemType());
+            r.setInterfaceVersion(src.getInterfaceVersion());
+            r.setAddrTon(src.getAddrTon());
+            r.setAddrNpi(src.getAddrNpi());
+            r.setAddressRange(src.getAddressRange());
+            return r;
+        }
+        // ---------- Unbind ----------
+        public boolean unbind() throws Exception {
+            if (!bound) {
+                System.out.println("[UNBIND] not bound -> disconnect");
+                socket.disconnect();
+                return true;
+            }
+
+            UnbindReq req = new UnbindReq();
+            req.setCommandStatus(0);
+
+            int seq = nextSeq();
+            req.setSequenceNumber(seq);
+
+            CompletableFuture<Pdu> f = pending.register(seq);
+
+            System.out.println("[UNBIND] TX UnbindReq seq=" + seq);
+            socket.sendBytes(encoder.encode(req));
+
+            try {
+                Pdu resp = f.get(cfg.getResponseTimeoutMs(), TimeUnit.MILLISECONDS);
+
+                System.out.println("[UNBIND] RX " + resp.getClass().getSimpleName()
+                        + " seq=" + resp.getSequenceNumber()
+                        + " status=0x" + String.format("%08X", resp.getCommandStatus()));
+
+                if (!(resp instanceof UnbindResp)) {
+                    throw new IllegalStateException("Expected UnbindResp but got: " + resp.getClass().getSimpleName());
+                }
+
+                boolean ok = resp.getCommandStatus() == 0;
+                System.out.println("[UNBIND] RESULT ok=" + ok);
+
+                bound = false;
+                socket.disconnect();
+                return ok;
+
+            } catch (TimeoutException te) {
+                System.out.println("[UNBIND] TIMEOUT waiting UnbindResp (will disconnect anyway)");
+                bound = false;
+                socket.disconnect();
+                return false;
+            }
+        }
+
+
+
+
+        // ---------- EnquireLink task ----------
+        public void startEnquireLinkTask() {
+            scheduler.scheduleAtFixedRate(() -> {
+                try {
+                    if (!bound) return;
+
+                    EnquireLinkReq req = new EnquireLinkReq();
+                    req.setCommandStatus(0);
+                    int seq = nextSeq();
+                    req.setSequenceNumber(seq);
+
+                    CompletableFuture<Pdu> f = pending.register(seq);
+
+                    System.out.println("[ENQUIRE] TX EnquireLinkReq seq=" + seq);
+                    socket.sendBytes(encoder.encode(req));
+
+                    Pdu resp = f.get(cfg.getResponseTimeoutMs(), TimeUnit.MILLISECONDS);
+
+                    System.out.println("[ENQUIRE] RX " + resp.getClass().getSimpleName()
+                            + " seq=" + resp.getSequenceNumber()
+                            + " status=" + resp.getCommandStatus());
+
+                    if (resp instanceof EnquireLinkResp && resp.getCommandStatus() == 0) {
+                        enquireOkCount.incrementAndGet();
+                        lastEnquireOkAtMs = System.currentTimeMillis();
+                    } else {
+                        log.warn("Expected EnquireLinkResp OK, got {}", resp.getClass().getSimpleName());
+                    }
+
+                } catch (TimeoutException te) {
+                    log.warn("[ENQUIRE] TIMEOUT => assume dead, recover");
+                    bound = false;
+                    reconnectAndRebind();
+                } catch (Exception e) {
+                    System.out.println("[ENQUIRE] ERROR: " + e);
+                    log.warn("EnquireLink task error", e);
+                }
+            }, 0, cfg.getEnquireLinkIntervalMs(), TimeUnit.MILLISECONDS);
+        }
+
+        public int getEnquireOkCount() {
+            return enquireOkCount.get();
+        }
+
+        public String sendSubmitSm(SubmitSmReq req) throws Exception {
+            if (!bound) throw new IllegalStateException("Session not bound");
+            return sender.sendSubmitSm(req);
+        }
+
+        private void handleDeliverSm(DeliverSmReq req) {
+            try {
+                // SMSC'ye ACK: DeliverSmResp
+                DeliverSmResp resp = new DeliverSmResp();
+                resp.setCommandStatus(0);
+                resp.setSequenceNumber(req.getSequenceNumber());
+                socket.sendBytes(encoder.encode(resp));
+
+                // Mesaj decode
+                String text = decodeDeliverSmText(req);
+
+                byte[] raw = getDeliverSmPayloadBytes(req);
+                System.out.println("[DBG] rawLen=" + raw.length);
+                System.out.println("[DBG] latin1=" + new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1));
+                System.out.println("[DBG] packedGuess=" + com.mycompany.smppclient.pdu.encoding.Gsm7Codec.decodeTurkishSingleShiftFromPacked(raw));
+                log.info("[DELIVER_SM RAW] dc=0x{} esm=0x{} sm_hex={}",
+                        String.format("%02X", req.getDataCoding()),
+                        String.format("%02X", req.getEsmClass()),
+                        toHex(raw));
+
+
+                // Receipt mi?
+                boolean byEsm = DeliveryReceiptParser.isDeliveryReceiptByEsmClass(req.getEsmClass());
+                boolean byText = DeliveryReceiptParser.looksLikeReceipt(text);
+
+
+                // Öncelik: esm_class
+                boolean isReceipt = byEsm || byText;
+
+                DeliveryReceipt receipt = isReceipt ? DeliveryReceiptParser.parse(text) : null;
+
+                log.info("[DLR CHECK] esm=0x{} byEsm={} byText={} isReceipt={}",
+                        String.format("%02X", req.getEsmClass()),
+                        byEsm, byText, isReceipt);
+
+
+                DeliverSmEvent ev = new DeliverSmEvent(
+                        req,
+                        req.getSourceAddr(),
+                        req.getDestinationAddr(),
+                        req.getEsmClass(),
+                        req.getDataCoding(),
+                        text,
+                        isReceipt,
+                        receipt
+                );
+
+                //Handler varsa çağır, yoksa logla
+                if (incomingHandler != null) {
+                    incomingHandler.onDeliverSm(ev);
+                } else {
+                    log.info("[DELIVER_SM] from={} to={} dc=0x{} esm=0x{} text={}",
+                            ev.sourceAddr, ev.destinationAddr,
+                            String.format("%02X", ev.dataCoding),
+                            String.format("%02X", ev.esmClass),
+                            ev.text
+                    );
+
+                    if (ev.isDeliveryReceipt && ev.receipt != null) {
+                        log.info("[DELIVERY_RECEIPT] {}", ev.receipt);
+                    }
+                }
+
+            } catch (Exception e) {
+                log.warn("handleDeliverSm error", e);
+            }
+        }
+
+        private String decodeDeliverSmText(DeliverSmReq req) {
+            byte[] raw0 = getDeliverSmPayloadBytes(req);
+            if (raw0 == null || raw0.length == 0) return "";
+
+            int dc = req.getDataCoding() & 0xFF;
+
+            // UDH varsa temizle
+            byte[] raw = stripUdhIfPresent(raw0, req.getEsmClass());
+            if (raw.length == 0) return "";
+
+            // UCS2
+            if (dc == 0x08) {
+                return new String(raw, java.nio.charset.StandardCharsets.UTF_16BE);
+            }
+
+            //  GSM7
+            if (dc == 0x00) {
+                String asLatin1 = new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
+                if (DeliveryReceiptParser.looksLikeReceipt(asLatin1)) return asLatin1;
+
+                if (looksLikePlainAscii(raw)) {
+                    // burada iki opsiyon var: direkt latin1 döndür veya septet-bytes decode
+                    // pratikte DLR dışında normal mesajda latin1 saçmalar, o yüzden:
+                    return com.mycompany.smppclient.pdu.encoding.Gsm7Codec.decodeTurkishSingleShiftFromBytes(raw);
+                }
+
+                // GSM7 packed decode
+                return com.mycompany.smppclient.pdu.encoding.Gsm7Codec.decodeTurkishSingleShiftFromPacked(raw);
+            }
+
+            // Diğer data_coding'ler için (şimdilik) fallback
+            return new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
+        }
+
+        private static boolean looksLikePlainAscii(byte[] raw) {
+            int printable = 0;
+            int controls = 0;
+            for (byte b : raw) {
+                int v = b & 0xFF;
+                if (v == 0x00) { controls++; continue; }
+                if (v == 0x0A || v == 0x0D || v == 0x09) { printable++; continue; }
+                if (v >= 0x20 && v <= 0x7E) printable++;
+                else controls++;
+            }
+            // çoğunluk printable ise "text gibi"
+            return printable >= controls * 2;
+        }
+
+        private byte[] getDeliverSmPayloadBytes(DeliverSmReq req) {
+            byte[] sm = req.getShortMessage();
+            if (sm != null && sm.length > 0) return sm;
+
+            // short_message boşsa TLV message_payload'e bak
+            if (req.getOptionalParameters() != null) {
+                for (var tlv : req.getOptionalParameters()) {
+                    if ((tlv.getTag() & 0xFFFF) == 0x0424) { // message_payload
+                        byte[] v = tlv.getValue();
+                        if (v != null) return v;
+                    }
+                }
+            }
+            return new byte[0];
+        }
+
+
+
+        private final Object reconnectLock = new Object();
+
+        private void reconnectAndRebind() {
+            synchronized (reconnectLock) {
+                try {
+                    if (bound) return;
+
+                    log.warn("[RECOVER] reconnect+rebind starting...");
+
+                    socket.reconnect(lastHost, lastPort); // yeni method
+                    socket.setOnPduBytes(this::onIncomingPduBytes);
+                    BindTransceiverReq br = copyBind(lastBindReq);
+                    boolean bindOk = doBindOnly(br);
+                    bound = bindOk;
+
+                    if (bindOk) {
+                        bound = true;
+                        log.info("[RECOVER] rebind OK");
+                    } else {
+                        log.error("[RECOVER] rebind FAILED");
+                    }
+
+                } catch (Exception e) {
+                    log.error("[RECOVER] error", e);
+                }
+            }
+        }
+
+
+        private static boolean hasUdhi(byte esmClass) {
+            return (esmClass & 0x40) != 0; // UDHI bit
+        }
+
+        private static byte[] stripUdhIfPresent(byte[] raw, byte esmClass) {
+            if (raw == null) return new byte[0];
+            if (!hasUdhi(esmClass)) return raw;
+            if (raw.length == 0) return raw;
+
+            int udhLen = raw[0] & 0xFF;           // UDHL (header length, excluding UDHL byte)
+            int start = 1 + udhLen;              // UDHL byte + header bytes
+            if (start < 0 || start > raw.length) return raw; // güvenlik
+            return Arrays.copyOfRange(raw, start, raw.length);
+        }
+
+
+        @Override
+        public void close() {
+            try { scheduler.shutdownNow(); } catch (Exception ignored) {}
+            try { socket.disconnect(); } catch (Exception ignored) {}
+        }
+    }
