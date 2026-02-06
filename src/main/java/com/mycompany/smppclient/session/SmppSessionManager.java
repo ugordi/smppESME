@@ -3,6 +3,7 @@
     import com.mycompany.smppclient.pdu.*;
     import com.mycompany.smppclient.pdu.decoder.PduDecoder;
     import com.mycompany.smppclient.pdu.encoder.PduEncoder;
+    import com.mycompany.smppclient.pdu.encoding.Gsm7Codec;
     import com.mycompany.smppclient.socket.SmppSocketClient;
     import org.apache.logging.log4j.LogManager;
     import org.apache.logging.log4j.Logger;
@@ -338,36 +339,24 @@
         }
 
         private String decodeDeliverSmText(DeliverSmReq req) {
-            byte[] raw0 = getDeliverSmPayloadBytes(req);
-            if (raw0 == null || raw0.length == 0) return "";
+            byte[] raw = getDeliverSmPayloadBytes(req);
+            if (raw == null || raw.length == 0) return "";
 
             int dc = req.getDataCoding() & 0xFF;
+            boolean hasUdh = (req.getEsmClass() & 0x40) != 0;
 
-            // UDH varsa temizle
-            byte[] raw = stripUdhIfPresent(raw0, req.getEsmClass());
-            if (raw.length == 0) return "";
-
-            // UCS2
-            if (dc == 0x08) {
+            if (dc == 0x08) { // UCS2
                 return new String(raw, java.nio.charset.StandardCharsets.UTF_16BE);
             }
 
-            //  GSM7
-            if (dc == 0x00) {
-                String asLatin1 = new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
-                if (DeliveryReceiptParser.looksLikeReceipt(asLatin1)) return asLatin1;
-
-                if (looksLikePlainAscii(raw)) {
-                    // burada iki opsiyon var: direkt latin1 döndür veya septet-bytes decode
-                    // pratikte DLR dışında normal mesajda latin1 saçmalar, o yüzden:
-                    return com.mycompany.smppclient.pdu.encoding.Gsm7Codec.decodeTurkishSingleShiftFromBytes(raw);
+            if (dc == 0x00 || dc == 0x01) { // GSM 7-Bit
+                if (hasUdh) {
+                    int udhLen = (raw[0] & 0xFF) + 1; // Toplam UDH uzunluğu (byte)
+                    return Gsm7Codec.decodeWithUdh(raw, udhLen);
+                } else {
+                    return Gsm7Codec.decodeTurkishSingleShiftFromPacked(raw);
                 }
-
-                // GSM7 packed decode
-                return com.mycompany.smppclient.pdu.encoding.Gsm7Codec.decodeTurkishSingleShiftFromPacked(raw);
             }
-
-            // Diğer data_coding'ler için (şimdilik) fallback
             return new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
         }
 

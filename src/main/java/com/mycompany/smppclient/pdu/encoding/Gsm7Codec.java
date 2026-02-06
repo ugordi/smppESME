@@ -1,6 +1,7 @@
 package com.mycompany.smppclient.pdu.encoding;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -120,4 +121,50 @@ public final class Gsm7Codec {
 
         return decodeTurkishSingleShiftFromSeptets(septets);
     }
+
+    public static String decodeWithUdh(byte[] fullData, int udhLengthBytes) {
+        // 1. Septetleri aç (Unpack)
+        // 7-bit dünyasında UDH dahil her şey septet olarak görülür
+        int totalSeptets = (fullData.length * 8) / 7;
+        int[] allSeptets = SeptetPacker.unpack(fullData, totalSeptets);
+
+        // 2. UDH'ın kaç septet kapladığını hesapla
+        // Header Length + 1 (UDHL byte'ı)
+        int udhSeptets = (int) Math.ceil(((double) udhLengthBytes) * 8 / 7);
+
+        // 3. Mesaj gövdesini al (UDH septetlerini atla)
+        int[] bodySeptets = Arrays.copyOfRange(allSeptets, udhSeptets, allSeptets.length);
+
+        return decodeTurkishSingleShiftFromSeptets(bodySeptets);
+    }
+
+    public static byte[] manualPackWithUdh(byte[] udh, int[] septets) {
+        // 1. Önce UDH'ı yerleştir
+        // UDH 4 byte ise metin 35. bitten başlamalı (3 bit padding)
+        int bitPos = (udh.length * 8) + 3;
+
+        // Toplam byte uzunluğunu hesapla (32 bit UDH + 3 bit pad + metin bitleri)
+        int totalBits = bitPos + (septets.length * 7);
+        byte[] out = new byte[(totalBits + 7) / 8];
+
+        // UDH'ı direkt kopyala
+        System.arraycopy(udh, 0, out, 0, udh.length);
+
+        // Metni (septetleri) 3 bit kaydırarak yerleştir
+        for (int s : septets) {
+            int septet = s & 0x7F;
+            int byteIndex = bitPos / 8;
+            int shift = bitPos % 8;
+
+            out[byteIndex] |= (byte) ((septet << shift) & 0xFF);
+            if (shift > 1) { // Eğer septet bir sonraki byte'a taşıyorsa
+                if (byteIndex + 1 < out.length) {
+                    out[byteIndex + 1] |= (byte) ((septet >> (8 - shift)) & 0xFF);
+                }
+            }
+            bitPos += 7;
+        }
+        return out;
+    }
+
 }
