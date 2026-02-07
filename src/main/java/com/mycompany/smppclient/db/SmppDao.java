@@ -34,7 +34,7 @@ public final class SmppDao {
             INSERT INTO smpp.pdu_log
               (direction, pdu_type, command_id, command_status, sequence_number, raw_hex, decoded_json)
             VALUES
-              (?, ?, ?, ?, ?, ?, ?)
+              (?::smpp.direction, ?, ?, ?, ?, ?, ?)
             RETURNING id
         """;
 
