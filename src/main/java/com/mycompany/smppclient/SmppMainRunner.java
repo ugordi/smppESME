@@ -26,17 +26,19 @@ public class SmppMainRunner {
 
             SmppSessionConfig cfg = new SmppSessionConfig(15000, 60000);
 
-            String dbUrl  = System.getenv().getOrDefault("DB_URL",  "jdbc:postgresql://localhost:5432/smpp");
-            String dbUser = System.getenv().getOrDefault("DB_USER", "smpp");
-            String dbPass = System.getenv().getOrDefault("DB_PASS", "smpp");
-
-            Db db = new Db(dbUrl, dbUser, dbPass);
+            // ---- DB ----
+            Db db = new Db(p.dbUrl, p.dbUser, p.dbPass);
             SmppDao dao = new SmppDao(db);
 
-            String sessionId = "sess-1";
-            String systemId = p.systemId;
-
-            SmppSessionManager sm = new SmppSessionManager(socket, cfg, inbox::offer, dao, sessionId, systemId);
+            // ---- SESSION ----
+            SmppSessionManager sm = new SmppSessionManager(
+                    socket,
+                    cfg,
+                    inbox::offer,
+                    dao,
+                    "sess-1",
+                    p.systemId
+            );
 
             // ---- BIND ----
             BindTransceiverReq bindReq = new BindTransceiverReq();

@@ -17,7 +17,7 @@ public class SmppProperties {
 
     public final String dbUrl;
     public final String dbUser;
-    public final String dbPassword;
+    public final String dbPass;
 
     private SmppProperties(Properties p) {
         this.host = req(p, "smpp.host");
@@ -32,7 +32,7 @@ public class SmppProperties {
 
         this.dbUrl = req(p, "db.url");
         this.dbUser = req(p, "db.user");
-        this.dbPassword = req(p, "db.password");
+        this.dbPass = req(p, "db.pass");
     }
 
     public static SmppProperties loadFromTestResources() {
