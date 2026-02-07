@@ -11,6 +11,8 @@ import com.mycompany.smppclient.socket.SmppSocketConfig;
 import java.util.Scanner;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import com.mycompany.smppclient.db.Db;
+import com.mycompany.smppclient.db.SmppDao;
 
 public class SmppMainRunner {
 
@@ -23,7 +25,18 @@ public class SmppMainRunner {
         try (SmppSocketClient socket = new SmppSocketClient(sockCfg, null)) {
 
             SmppSessionConfig cfg = new SmppSessionConfig(15000, 60000);
-            SmppSessionManager sm = new SmppSessionManager(socket, cfg, inbox::offer);
+
+            String dbUrl  = System.getenv().getOrDefault("DB_URL",  "jdbc:postgresql://localhost:5432/smpp");
+            String dbUser = System.getenv().getOrDefault("DB_USER", "smpp");
+            String dbPass = System.getenv().getOrDefault("DB_PASS", "smpp");
+
+            Db db = new Db(dbUrl, dbUser, dbPass);
+            SmppDao dao = new SmppDao(db);
+
+            String sessionId = "sess-1";
+            String systemId = p.systemId;
+
+            SmppSessionManager sm = new SmppSessionManager(socket, cfg, inbox::offer, dao, sessionId, systemId);
 
             // ---- BIND ----
             BindTransceiverReq bindReq = new BindTransceiverReq();
