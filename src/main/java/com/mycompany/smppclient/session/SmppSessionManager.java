@@ -11,6 +11,10 @@
     import java.util.concurrent.*;
     import java.util.concurrent.atomic.AtomicInteger;
     import java.util.Arrays;
+    import java.nio.ByteBuffer;
+    import java.nio.ByteOrder;
+    import java.util.HashMap;
+    import java.util.Map;
 
 
     public class SmppSessionManager implements AutoCloseable {
@@ -65,10 +69,11 @@
             this.cfg = cfg;
             this.incomingHandler = handler;
 
-            this.dao = null;
-            this.sessionId = null;
-            this.systemId = null;
-            this.sender = new SmppSender(socket, cfg, encoder, pending, seqGen);
+            this.dao = dao;
+            this.sessionId = sessionId;
+            this.systemId = systemId;
+            this.sender = new SmppSender(socket, cfg, encoder, pending, seqGen, dao);
+
         }
 
         public boolean isBound() { return bound; }
@@ -83,9 +88,28 @@
         }
 
         public void onIncomingPduBytes(byte[] data) {
+            String rawHex = bytesToHex(data);
+            PduHeader h = parseHeader(data);
+
             try {
                 Pdu pdu = decoder.decode(data);
                 log.debug("RX: {}", pdu);
+
+                if (dao != null) {
+                    try {
+                        dao.insertPduLog(
+                                com.mycompany.smppclient.db.SmppDao.Direction.IN,
+                                pdu.getClass().getSimpleName(),  // pduType
+                                h.commandId,
+                                h.commandStatus,
+                                h.sequence,
+                                rawHex,
+                                toMap(pdu)
+                        );
+                    } catch (Exception ex) {
+                        log.warn("DB insert (IN) failed", ex);
+                    }
+                }
 
                 if (pdu instanceof DeliverSmReq) {
                     handleDeliverSm((DeliverSmReq) pdu);
@@ -95,7 +119,9 @@
                     EnquireLinkResp r = new EnquireLinkResp();
                     r.setCommandStatus(0);
                     r.setSequenceNumber(pdu.getSequenceNumber());
+
                     socket.sendBytes(encoder.encode(r));
+
                     log.info("[ENQUIRE] RX EnquireLinkReq -> TX EnquireLinkResp seq={}", pdu.getSequenceNumber());
                     return;
                 }
@@ -103,7 +129,11 @@
                     UnbindResp r = new UnbindResp();
                     r.setCommandStatus(0);
                     r.setSequenceNumber(pdu.getSequenceNumber());
-                    socket.sendBytes(encoder.encode(r));
+
+                    sendAndLog(r, "UnbindResp");
+
+
+
                     bound = false;
                     log.info("[UNBIND] RX UnbindReq -> TX UnbindResp seq={}", pdu.getSequenceNumber());
                     return;
@@ -118,10 +148,27 @@
                 }
 
             } catch (Exception e) {
-                //reader thread ölmmesi için
-                log.error("RX decode failed: {}", toHex(data), e);
+                log.error("RX decode failed: {}", rawHex, e);
+
+                    // ✅ DB: IN log (decode FAIL)
+                    if (dao != null) {
+                        try {
+                            dao.insertPduLog(
+                                    com.mycompany.smppclient.db.SmppDao.Direction.IN,
+                                    "DECODE_FAILED",
+                                    h.commandId,
+                                    h.commandStatus,
+                                    h.sequence,
+                                    rawHex,
+                                    Map.of("error", String.valueOf(e.getMessage()))
+                            );
+                        } catch (Exception ex) {
+                            log.warn("DB insert (IN decode_failed) failed", ex);
+                        }
+                    }
             }
         }
+
 
         private static String toHex(byte[] b) {
             StringBuilder sb = new StringBuilder();
@@ -152,7 +199,7 @@
 
             CompletableFuture<Pdu> f = pending.register(seq);
 
-            socket.sendBytes(encoder.encode(req));
+            sendAndLog(req, "BindTransceiverReq");
 
             Pdu resp = f.get(cfg.getResponseTimeoutMs(), TimeUnit.MILLISECONDS);
             if (!(resp instanceof BindTransceiverResp)) {
@@ -190,7 +237,10 @@
             CompletableFuture<Pdu> f = pending.register(seq);
 
             System.out.println("[UNBIND] TX UnbindReq seq=" + seq);
-            socket.sendBytes(encoder.encode(req));
+
+
+            sendAndLog(req, "UnbindReq");
+
 
             try {
                 Pdu resp = f.get(cfg.getResponseTimeoutMs(), TimeUnit.MILLISECONDS);
@@ -276,7 +326,8 @@
                 DeliverSmResp resp = new DeliverSmResp();
                 resp.setCommandStatus(0);
                 resp.setSequenceNumber(req.getSequenceNumber());
-                socket.sendBytes(encoder.encode(resp));
+
+                sendAndLog(resp, "DeliverSmResp");
 
                 // Mesaj decode
                 String text = decodeDeliverSmText(req);
@@ -435,6 +486,101 @@
             if (start < 0 || start > raw.length) return raw; // güvenlik
             return Arrays.copyOfRange(raw, start, raw.length);
         }
+
+        private static String bytesToHex(byte[] b) {
+            if (b == null) return "";
+            StringBuilder sb = new StringBuilder(b.length * 2);
+            for (byte x : b) sb.append(String.format("%02X", x));
+            return sb.toString();
+        }
+
+        private static final class PduHeader {
+            final int commandLength;
+            final int commandId;
+            final int commandStatus;
+            final int sequence;
+            PduHeader(int l, int id, int st, int seq) {
+                this.commandLength = l;
+                this.commandId = id;
+                this.commandStatus = st;
+                this.sequence = seq;
+            }
+        }
+
+        private static PduHeader parseHeader(byte[] data) {
+            if (data == null || data.length < 16) return new PduHeader(0, 0, 0, 0);
+            ByteBuffer bb = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
+            int len = bb.getInt();
+            int cid = bb.getInt();
+            int st  = bb.getInt();
+            int seq = bb.getInt();
+            return new PduHeader(len, cid, st, seq);
+        }
+
+        /** decoded_json için minimal map */
+        private static Map<String, Object> toMap(Pdu pdu) {
+            Map<String, Object> m = new HashMap<>();
+            if (pdu == null) return m;
+
+            m.put("class", pdu.getClass().getSimpleName());
+            m.put("sequence_number", pdu.getSequenceNumber());
+            m.put("command_status", pdu.getCommandStatus());
+            m.put("command_length", pdu.getCommandLength());
+
+            if (pdu instanceof BindTransceiverReq r) {
+                m.put("system_id", r.getSystemId());
+                m.put("system_type", r.getSystemType());
+                m.put("interface_version", r.getInterfaceVersion() & 0xFF);
+                m.put("addr_ton", r.getAddrTon() & 0xFF);
+                m.put("addr_npi", r.getAddrNpi() & 0xFF);
+                m.put("address_range", r.getAddressRange());
+            } else if (pdu instanceof BindTransceiverResp r) {
+                m.put("system_id", r.getSystemId());
+            } else if (pdu instanceof SubmitSmReq r) {
+                m.put("service_type", r.getServiceType());
+                m.put("source_addr", r.getSourceAddr());
+                m.put("destination_addr", r.getDestinationAddr());
+                m.put("esm_class", r.getEsmClass() & 0xFF);
+                m.put("data_coding", r.getDataCoding() & 0xFF);
+                byte[] sm = r.getShortMessage();
+                m.put("sm_length", sm == null ? 0 : sm.length);
+                m.put("short_message_hex", bytesToHex(sm));
+            } else if (pdu instanceof SubmitSmResp r) {
+                m.put("message_id", r.getMessageId());
+            } else if (pdu instanceof DeliverSmReq r) {
+                m.put("source_addr", r.getSourceAddr());
+                m.put("destination_addr", r.getDestinationAddr());
+                m.put("esm_class", r.getEsmClass() & 0xFF);
+                m.put("data_coding", r.getDataCoding() & 0xFF);
+                byte[] sm = r.getShortMessage();
+                m.put("sm_length", sm == null ? 0 : sm.length);
+                m.put("short_message_hex", bytesToHex(sm));
+            }
+            return m;
+        }
+
+    private void sendAndLog(Pdu pdu, String pduTypeForDb) throws Exception {
+        byte[] bytes = encoder.encode(pdu);
+        socket.sendBytes(bytes);
+
+        if (dao != null) {
+            String rawHex = bytesToHex(bytes);
+            PduHeader h = parseHeader(bytes);
+            try {
+                dao.insertPduLog(
+                        com.mycompany.smppclient.db.SmppDao.Direction.OUT,
+                        pduTypeForDb,
+                        h.commandId,
+                        h.commandStatus,
+                        h.sequence,
+                        rawHex,
+                        toMap(pdu)
+                );
+            } catch (Exception ex) {
+                log.warn("DB insert (OUT) failed", ex);
+            }
+        }
+    }
 
 
         @Override
