@@ -121,7 +121,7 @@
                                 toMap(pdu)
                         );
                     } catch (Exception ex) {
-                        log.warn("DB insert (IN) failed", ex);
+                        log.warn("fail for Enquire", ex);
                     }
                 }
 

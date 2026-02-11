@@ -101,8 +101,8 @@ public class SmppMainRunner {
                         req.setDestAddrNpi((byte) 1);
                         req.setDestinationAddr(SmppSender.normalizeMsisdn(msisdn));
 
-                        //req.setEsmClass((byte) 0); // UDH YOK
-                        req.setEsmClass((byte) 0x40); // UDH VAR
+                        req.setEsmClass((byte) 0); // UDH YOK
+                        //req.setEsmClass((byte) 0x40); // UDH VAR
 
                         req.setProtocolId((byte) 0);
                         req.setPriorityFlag((byte) 0);
@@ -110,8 +110,8 @@ public class SmppMainRunner {
                         req.setDataCoding((byte) 0x00);         // GSM7
 
 
-                       //req.setShortMessage(Gsm7Codec.encodeUnpacked(msg));
-                        req.setShortMessage(Gsm7Codec.prependUdh(msg));
+                       req.setShortMessage(Gsm7Codec.encodeUnpacked(msg));
+                        //req.setShortMessage(Gsm7Codec.prependUdh(msg));
 
 
 
