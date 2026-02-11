@@ -24,7 +24,7 @@ public class SmppMainRunner {
 
         try (SmppSocketClient socket = new SmppSocketClient(sockCfg, null)) {
 
-            SmppSessionConfig cfg = new SmppSessionConfig(15000, 60000);
+            SmppSessionConfig cfg = new SmppSessionConfig(15000, 30000);
 
             // ---- DB ----
             Db db = new Db(p.dbUrl, p.dbUser, p.dbPass);
@@ -101,13 +101,21 @@ public class SmppMainRunner {
                         req.setDestAddrNpi((byte) 1);
                         req.setDestinationAddr(SmppSender.normalizeMsisdn(msisdn));
 
-                        req.setEsmClass((byte) 0);
+                        //req.setEsmClass((byte) 0); // UDH YOK
+                        req.setEsmClass((byte) 0x40); // UDH VAR
+
                         req.setProtocolId((byte) 0);
                         req.setPriorityFlag((byte) 0);
+                        req.setRegisteredDelivery((byte) 1); // DLR iste
+                        req.setDataCoding((byte) 0x00);         // GSM7
 
-                        req.setRegisteredDelivery((byte) 3); // DLR iste
-                        req.setDataCoding((byte) 0);         // GSM7
-                        req.setShortMessage(Gsm7Codec.encodeTurkishSingleShiftBytes(msg));
+
+                       //req.setShortMessage(Gsm7Codec.encodeUnpacked(msg));
+                        req.setShortMessage(Gsm7Codec.prependUdh(msg));
+
+
+
+
 
                         String messageId = sm.sendSubmitSm(req);
                         System.out.println("[SUBMIT_SM] message_id=" + messageId);

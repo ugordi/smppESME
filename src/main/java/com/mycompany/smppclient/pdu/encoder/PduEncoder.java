@@ -86,7 +86,7 @@ public class PduEncoder {
     private void encodeSubmitSmReq(SubmitSmReq req, ByteWriter w) {
 
         requireNotNull(req.getSourceAddr(), "sourceAddr");
-        requireNotNull(req.getDestinationAddr(), "destinationAddr");
+        requireNotNull(req.getDestinationAddr(), "destinationAddr"  );
 
         w.writeCString(req.getServiceType());
         w.writeByte(req.getSourceAddrTon());
@@ -105,7 +105,7 @@ public class PduEncoder {
         w.writeCString(""); // schedule_delivery_time
         w.writeCString(""); // validity_period
 
-        w.writeByte(0); // registered_delivery (istersen req getter ekleyip kullan)
+        w.writeByte(req.getRegisteredDelivery()); //REGİTERED DELİVERY
         w.writeByte(0); // replace_if_present_flag
         w.writeByte(req.getDataCoding());
         w.writeByte(0); // sm_default_msg_id
@@ -122,16 +122,14 @@ public class PduEncoder {
     }
 
     private void encodeSubmitSmResp(SubmitSmResp resp, ByteWriter w) {
-        // submit_sm_resp body: message_id (CString)
         requireNotNull(resp.getMessageId(), "messageId");
         w.writeCString(resp.getMessageId());
+        encodeTlvs(resp.getOptionalParameters(), w);
     }
 
     // -------------------- DELIVER_SM --------------------
     private void encodeDeliverSmReq(DeliverSmReq req, ByteWriter w) {
-        // deliver_sm body submit_sm ile çok benzer; biz minimum gerekli alanları
-        // (dataCoding + shortMessage + tlv) zaten POJO’da tutuyoruz.
-        // Ancak SMPP sırasını doldurmamız gerek; bilinmeyenleri "0/''" geçiyoruz.
+
         w.writeCString(""); // service_type
         w.writeByte(0);     // source_addr_ton
         w.writeByte(0);     // source_addr_npi
@@ -164,9 +162,9 @@ public class PduEncoder {
     }
 
     private void encodeDeliverSmResp(DeliverSmResp resp, ByteWriter w) {
-        // deliver_sm_resp body: message_id (CString) — senin sınıfın böyle yazmış
         requireNotNull(resp.getMessageId(), "messageId");
         w.writeCString(resp.getMessageId());
+        encodeTlvs(resp.getOptionalParameters(), w);
     }
 
     // -------------------- TLV --------------------
@@ -175,18 +173,11 @@ public class PduEncoder {
 
         for (OptionalParameter p : tlvs) {
             if (p == null) continue;
-            int tag = p.getTag();
-            int len = p.getLength();
-            byte[] val = p.getValue();
 
+            int tag = p.getTag();
+            byte[] val = p.getValue();
             if (val == null) val = new byte[0];
-            if (len != val.length) {
-                // “length” yanlış set edildiyse otomatik düzeltmek yerine hata verelim
-                throw new InvalidPduException("TLV length mismatch for tag=0x" +
-                        Integer.toHexString(tag) + " length=" + len + " value.length=" + val.length);
-            }
-            if (tag < 0 || tag > 0xFFFF) throw new InvalidPduException("TLV tag out of range: " + tag);
-            if (len < 0 || len > 0xFFFF) throw new InvalidPduException("TLV length out of range: " + len);
+            int len = val.length;
 
             w.writeShort(tag);
             w.writeShort(len);

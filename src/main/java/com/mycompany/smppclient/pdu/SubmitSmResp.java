@@ -10,6 +10,7 @@ public class SubmitSmResp extends Pdu {
     public String getMessageId() { return messageId; }
     public void setMessageId(String messageId) { this.messageId = messageId; }
 
+
     @Override
     public String toString() {
         return super.toString().replace("}", "") +

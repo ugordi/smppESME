@@ -62,7 +62,7 @@ public class SmppSender {
         byte[] bytes = encoder.encode(req);
         socket.sendBytes(bytes);
 
-// ✅ DB: OUT submit_sm (ham hex + minimal decoded)
+
         if (dao != null) {
             try {
                 String rawHex = bytesToHex(bytes);
@@ -93,8 +93,7 @@ public class SmppSender {
                         decoded
                 );
             } catch (Exception ex) {
-                // DB hata verirse SMS gönderimi ölmesin
-                // log yoksa sessiz geç
+
             }
         }
 

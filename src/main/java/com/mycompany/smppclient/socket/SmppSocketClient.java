@@ -35,6 +35,19 @@ public class SmppSocketClient implements AutoCloseable {
 
     private java.util.function.Consumer<byte[]> onPduBytes;
 
+    private Runnable onDisconnect;
+
+    public int getMaxReconnectAttempts() {
+        return config.getMaxReconnectAttempts();
+    }
+
+    public int getReconnectBackoffMs() {
+        return config.getReconnectBackoffMs();
+    }
+
+    public void setOnDisconnect(Runnable onDisconnect) {
+        this.onDisconnect = onDisconnect;
+    }
 
     public SmppSocketClient(SmppSocketConfig config, BytesListener listener) {
         this.config = Objects.requireNonNull(config, "config");
@@ -83,6 +96,16 @@ public class SmppSocketClient implements AutoCloseable {
             localOut.flush();
         } catch (IOException e) {
             log.warn("sendBytes failed: {}", e.toString());
+
+
+            running.set(false);
+            safeCloseSocket();
+
+            Runnable cb = onDisconnect;
+            if (cb != null) {
+                try { cb.run(); } catch (Exception ex) { log.warn("onDisconnect callback failed: {}", ex.toString()); }
+            }
+
             throw new RuntimeException("sendBytes failed", e);
         }
     }
@@ -146,9 +169,16 @@ public class SmppSocketClient implements AutoCloseable {
                     log.debug("Read timeout (no data) - continuing...");
                 } catch (Exception e) {
                     if (!running.get()) break;
+
                     log.warn("Reader loop error: {}. stopping reader.", e.toString());
+
                     running.set(false);
                     safeCloseSocket();
+
+                    Runnable cb = onDisconnect;
+                    if (cb != null) {
+                        try { cb.run(); } catch (Exception ex) { log.warn("onDisconnect callback failed: {}", ex.toString()); }
+                    }
                     break;
                 }
             }
@@ -203,11 +233,7 @@ public class SmppSocketClient implements AutoCloseable {
         return sb.toString();
     }
 
-    @Override
-    public void close() {
-        disconnect();
-        readerExecutor.shutdownNow();
-    }
+
 
     private static int readIntBE(byte[] b, int off) {
         return ((b[off] & 0xFF) << 24) |
@@ -215,4 +241,11 @@ public class SmppSocketClient implements AutoCloseable {
                 ((b[off + 2] & 0xFF) << 8) |
                 (b[off + 3] & 0xFF);
     }
+
+    @Override
+    public void close() {
+        disconnect();
+        readerExecutor.shutdownNow();
+    }
+
 }

@@ -12,7 +12,10 @@ public class PendingRequestRegistry {
 
     public CompletableFuture<Pdu> register(int seq) {
         CompletableFuture<Pdu> f = new CompletableFuture<>();
-        pending.put(seq, f);
+        CompletableFuture<Pdu> prev = pending.putIfAbsent(seq, f);
+        if (prev != null) {
+            throw new IllegalStateException("Duplicate seq register: " + seq);
+        }
         return f;
     }
 

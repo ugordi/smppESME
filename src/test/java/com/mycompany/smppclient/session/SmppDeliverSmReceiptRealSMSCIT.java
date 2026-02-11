@@ -70,7 +70,7 @@ public class SmppDeliverSmReceiptRealSMSCIT {
 
             // GSM7
             req.setDataCoding((byte) 0);
-            byte[] msgBytes = Gsm7Codec.encodeTurkishSingleShiftBytes("selam");
+            byte[] msgBytes = Gsm7Codec.encodeUnpacked("selam");
             req.setShortMessage(msgBytes);
 
             String messageId = sm.sendSubmitSm(req);

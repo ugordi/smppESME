@@ -15,11 +15,7 @@ public final class SmppDao {
 
     public enum Direction { IN, OUT }
 
-    /**
-     * ✅ Hem gelen hem giden PDU’yu kaydeder.
-     * ✅ RAW HEX: rawHex parametresi -> DB’de smpp.pdu_log.raw_hex
-     * ✅ Decode edilmiş alanlar: decodedFields -> smpp.pdu_log.decoded_json
-     */
+
     public long insertPduLog(
             Direction direction,
             String pduType,

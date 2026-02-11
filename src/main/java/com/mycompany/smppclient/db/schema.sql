@@ -15,10 +15,10 @@ CREATE TABLE IF NOT EXISTS smpp.pdu_log (
     command_id      INT  NOT NULL,
     command_status  INT  NOT NULL,
 
-    -- ✅ RAW PDU HEX BURADA TUTULUYOR
+    -- RAW PDU HEX BURADA TUTULUYOR
     raw_hex         TEXT NOT NULL,
 
-    -- ✅ Decode edilmiş alanların tamamı burada (JSON)
+    --  Decode edilmiş alanların tamamı burada (JSON)
     decoded_json    JSONB
     );
 

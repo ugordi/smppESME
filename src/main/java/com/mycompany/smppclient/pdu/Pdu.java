@@ -1,5 +1,9 @@
 package com.mycompany.smppclient.pdu;
 
+import com.mycompany.smppclient.pdu.tlv.OptionalParameter;
+
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 public abstract class Pdu {
@@ -23,6 +27,12 @@ public abstract class Pdu {
 
     public int getSequenceNumber() { return sequenceNumber; }
     public void setSequenceNumber(int sequenceNumber) { this.sequenceNumber = sequenceNumber; }
+
+    private final List<OptionalParameter> optionalParameters = new ArrayList<>();
+
+    public List<OptionalParameter> getOptionalParameters() {
+        return optionalParameters;
+    }
 
     @Override
     public String toString() {

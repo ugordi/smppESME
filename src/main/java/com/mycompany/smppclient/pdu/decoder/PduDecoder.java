@@ -115,6 +115,8 @@ public class PduDecoder {
     private SubmitSmResp decodeSubmitSmResp(ByteReader r) {
         SubmitSmResp resp = new SubmitSmResp();
         resp.setMessageId(r.readCString());
+
+        resp.getOptionalParameters().addAll(readTlvs(r));
         return resp;
     }
 
@@ -122,17 +124,17 @@ public class PduDecoder {
     private DeliverSmReq decodeDeliverSmReq(ByteReader r) {
         DeliverSmReq req = new DeliverSmReq();
 
-        // Sadece r.read... demek yetmez, req.set... ile objeye aktarmalısın
+
         req.setServiceType(r.readCString());
         req.setSourceAddrTon((byte) r.readByte());
         req.setSourceAddrNpi((byte) r.readByte());
-        req.setSourceAddr(r.readCString()); // LOGDAKİ 'from' BURASI
+        req.setSourceAddr(r.readCString());
 
         req.setDestAddrTon((byte) r.readByte());
         req.setDestAddrNpi((byte) r.readByte());
-        req.setDestinationAddr(r.readCString()); // LOGDAKİ 'to' BURASI
+        req.setDestinationAddr(r.readCString());
 
-        req.setEsmClass((byte) r.readByte()); // DLR kontrolü için kritik
+        req.setEsmClass((byte) r.readByte());
         req.setProtocolId((byte) r.readByte());
         req.setPriorityFlag((byte) r.readByte());
 
@@ -158,6 +160,7 @@ public class PduDecoder {
         } else {
             resp.setMessageId("");
         }
+        resp.getOptionalParameters().addAll(readTlvs(r));
         return resp;
     }
 

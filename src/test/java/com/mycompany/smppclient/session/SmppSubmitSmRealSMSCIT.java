@@ -64,7 +64,7 @@ public class SmppSubmitSmRealSMSCIT {
             // data_coding:
             req.setDataCoding((byte) 0);
 
-            byte[] msgBytes = Gsm7Codec.encodeTurkishSingleShiftBytes("selam Çağrı şeker");
+            byte[] msgBytes = Gsm7Codec.encodeUnpacked("selam Çağrı şeker");
             req.setShortMessage(msgBytes);
 
             String messageId = sm.sendSubmitSm(req);

@@ -78,13 +78,10 @@
 
         public boolean isBound() { return bound; }
 
+        private static final int MAX_SEQ = 0x7FFFFFFF;
         private int nextSeq() {
-            int v = seqGen.getAndIncrement();
-            if (v <= 0) {
-                seqGen.set(1);
-                v = seqGen.getAndIncrement();
-            }
-            return v;
+            // dönen değer: 1 ile MAX_SEQ arasında olmalı
+            return seqGen.getAndUpdate(cur -> (cur >= MAX_SEQ ? 1 : cur + 1));
         }
 
         public void onIncomingPduBytes(byte[] data) {
@@ -95,7 +92,24 @@
                 Pdu pdu = decoder.decode(data);
                 log.debug("RX: {}", pdu);
 
-                if (dao != null) {
+
+                if (pdu instanceof GenericNack gn) {
+                    int seq = gn.getSequenceNumber();
+                    int st = gn.getCommandStatus();
+
+                    log.error("[GENERIC_NACK] RX seq={} status=0x{}", seq, String.format("%08X", st));
+
+                    // ilgili bekleyeni bitirir
+                    pending.fail(seq, new RuntimeException("GENERIC_NACK status=0x" + String.format("%08X", st)));
+
+
+                    return;
+                }
+
+
+                boolean isEnquire = (pdu instanceof EnquireLinkReq) || (pdu instanceof EnquireLinkResp);
+
+                if (dao != null && !isEnquire) {
                     try {
                         dao.insertPduLog(
                                 com.mycompany.smppclient.db.SmppDao.Direction.IN,
@@ -150,8 +164,18 @@
             } catch (Exception e) {
                 log.error("RX decode failed: {}", rawHex, e);
 
-                    // ✅ DB: IN log (decode FAIL)
-                    if (dao != null) {
+                if (e instanceof com.mycompany.smppclient.pdu.exception.DecodeException
+                        || e instanceof com.mycompany.smppclient.pdu.exception.InvalidPduException) {
+
+                    if (bound) {
+                        log.warn("[RX] decode/invalid pdu -> recover");
+                        pending.clearAll(e);
+                        bound = false;
+                        reconnectAndRebind();
+                    }
+                }
+
+                if (dao != null) {
                         try {
                             dao.insertPduLog(
                                     com.mycompany.smppclient.db.SmppDao.Direction.IN,
@@ -187,6 +211,17 @@
 
             socket.setOnPduBytes(this::onIncomingPduBytes);
 
+            socket.setOnDisconnect(() -> {
+
+                pending.clearAll(new RuntimeException("socket disconnected"));
+
+                if (bound) {
+                    log.warn("[SOCKET] disconnected -> recover");
+                    bound = false;
+                    reconnectAndRebind();
+                }
+            });
+
             boolean bindOk = doBindOnly(req);
             bound = bindOk;
             return bindOk;
@@ -201,7 +236,7 @@
 
             sendAndLog(req, "BindTransceiverReq");
 
-            Pdu resp = f.get(cfg.getResponseTimeoutMs(), TimeUnit.MILLISECONDS);
+            Pdu resp = awaitResponse("BIND", seq, f);
             if (!(resp instanceof BindTransceiverResp)) {
                 throw new IllegalStateException("Expected BindTransceiverResp but got: " + resp.getClass().getSimpleName());
             }
@@ -243,7 +278,7 @@
 
 
             try {
-                Pdu resp = f.get(cfg.getResponseTimeoutMs(), TimeUnit.MILLISECONDS);
+                Pdu resp = awaitResponse("UNBIND", seq, f);
 
                 System.out.println("[UNBIND] RX " + resp.getClass().getSimpleName()
                         + " seq=" + resp.getSequenceNumber()
@@ -287,7 +322,8 @@
                     System.out.println("[ENQUIRE] TX EnquireLinkReq seq=" + seq);
                     socket.sendBytes(encoder.encode(req));
 
-                    Pdu resp = f.get(cfg.getResponseTimeoutMs(), TimeUnit.MILLISECONDS);
+                    Pdu resp = awaitResponse("ENQUIRE", seq, f);
+
 
                     System.out.println("[ENQUIRE] RX " + resp.getClass().getSimpleName()
                             + " seq=" + resp.getSequenceNumber()
@@ -333,9 +369,6 @@
                 String text = decodeDeliverSmText(req);
 
                 byte[] raw = getDeliverSmPayloadBytes(req);
-                System.out.println("[DBG] rawLen=" + raw.length);
-                System.out.println("[DBG] latin1=" + new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1));
-                System.out.println("[DBG] packedGuess=" + com.mycompany.smppclient.pdu.encoding.Gsm7Codec.decodeTurkishSingleShiftFromPacked(raw));
                 log.info("[DELIVER_SM RAW] dc=0x{} esm=0x{} sm_hex={}",
                         String.format("%02X", req.getDataCoding()),
                         String.format("%02X", req.getEsmClass()),
@@ -393,37 +426,67 @@
             byte[] raw = getDeliverSmPayloadBytes(req);
             if (raw == null || raw.length == 0) return "";
 
-            int dc = req.getDataCoding() & 0xFF;
-            boolean hasUdh = (req.getEsmClass() & 0x40) != 0;
+            int dc  = req.getDataCoding() & 0xFF;
+            int esm = req.getEsmClass() & 0xFF;
 
-            if (dc == 0x08) { // UCS2
+            //  dc kontrol
+            if (dc == 0x00) {
+
+                if ((esm & 0x40) != 0 && raw.length > 0) {
+                    int udhl = raw[0] & 0xFF;
+                    int udhTotalBytes = 1 + udhl;
+                    if (udhTotalBytes <= raw.length) {
+                        byte[] body = java.util.Arrays.copyOfRange(raw, udhTotalBytes, raw.length);
+                        String tUdh = Gsm7Codec.decodeUnpacked(body);
+                        if (!looksBroken(tUdh)) return tUdh;
+                    }
+                }
+
+                String t1 = Gsm7Codec.decodeUnpacked(raw);
+                if (!looksBroken(t1)) {
+                    return t1;
+                }
+
+
+                String latin = new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
+                if (DeliveryReceiptParser.looksLikeReceipt(latin)) {
+                    return latin;
+                }
+
+
+                return latin;
+            }
+
+            // 2) UCS2
+            if (dc == 0x08) {
                 return new String(raw, java.nio.charset.StandardCharsets.UTF_16BE);
             }
 
-            if (dc == 0x00 || dc == 0x01) { // GSM 7-Bit
-                if (hasUdh) {
-                    int udhLen = (raw[0] & 0xFF) + 1; // Toplam UDH uzunluğu (byte)
-                    return Gsm7Codec.decodeWithUdh(raw, udhLen);
-                } else {
-                    return Gsm7Codec.decodeTurkishSingleShiftFromPacked(raw);
-                }
-            }
+            // 3) fallback
             return new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
         }
 
-        private static boolean looksLikePlainAscii(byte[] raw) {
-            int printable = 0;
-            int controls = 0;
-            for (byte b : raw) {
-                int v = b & 0xFF;
-                if (v == 0x00) { controls++; continue; }
-                if (v == 0x0A || v == 0x0D || v == 0x09) { printable++; continue; }
-                if (v >= 0x20 && v <= 0x7E) printable++;
-                else controls++;
+        private static boolean looksBroken(String s) {
+            if (s == null) return true;
+            if (s.isEmpty()) return true;
+
+            int bad = 0;
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+
+                // kontrol karakterleri (tab/newline hariç)
+                if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') bad++;
+
+                // çok fazla soru işareti de kötü işaret
+                if (c == '?') bad++;
             }
-            // çoğunluk printable ise "text gibi"
-            return printable >= controls * 2;
+
+            // oran bazlı karar
+            double ratio = (double) bad / (double) s.length();
+            return ratio > 0.25; // %25'ten fazlası "kötü" ise bozuk say
         }
+
+
 
         private byte[] getDeliverSmPayloadBytes(DeliverSmReq req) {
             byte[] sm = req.getShortMessage();
@@ -444,48 +507,73 @@
 
 
         private final Object reconnectLock = new Object();
+        private volatile boolean recovering = false;
 
         private void reconnectAndRebind() {
             synchronized (reconnectLock) {
-                try {
-                    if (bound) return;
-
-                    log.warn("[RECOVER] reconnect+rebind starting...");
-
-                    socket.reconnect(lastHost, lastPort); // yeni method
-                    socket.setOnPduBytes(this::onIncomingPduBytes);
-                    BindTransceiverReq br = copyBind(lastBindReq);
-                    boolean bindOk = doBindOnly(br);
-                    bound = bindOk;
-
-                    if (bindOk) {
-                        bound = true;
-                        log.info("[RECOVER] rebind OK");
-                    } else {
-                        log.error("[RECOVER] rebind FAILED");
-                    }
-
-                } catch (Exception e) {
-                    log.error("[RECOVER] error", e);
-                }
+                if (bound) return;
+                if (recovering) return;
+                recovering = true;
             }
+
+            new Thread(() -> {
+                try {
+                    final int maxAttempts = Math.max(1, socket.getMaxReconnectAttempts());
+                    final int backoffMs  = Math.max(100, socket.getReconnectBackoffMs());
+
+                    while (!bound) {
+
+                        boolean success = false;
+
+                        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+                            if (bound) return;
+
+                            try {
+                                log.warn("[RECOVER] attempt {}/{} reconnecting to {}:{} ...",
+                                        attempt, maxAttempts, lastHost, lastPort);
+
+                                pending.clearAll(new RuntimeException("reconnect"));
+
+                                socket.reconnect(lastHost, lastPort);
+                                socket.setOnPduBytes(this::onIncomingPduBytes);
+
+                                BindTransceiverReq br = copyBind(lastBindReq);
+                                boolean bindOk = doBindOnly(br);
+                                bound = bindOk;
+
+                                if (bindOk) {
+                                    log.info("[RECOVER] rebind OK");
+                                    success = true;
+                                    return;
+                                } else {
+                                    log.error("[RECOVER] rebind FAILED (status!=0)");
+                                }
+
+                            } catch (Exception e) {
+                                log.warn("[RECOVER] attempt {}/{} failed: {}",
+                                        attempt, maxAttempts, e.toString());
+                            }
+
+                            // denemeler arası backoff
+                            try { Thread.sleep(backoffMs); } catch (InterruptedException ignored) {}
+                        }
+
+                        // Bu turda maxAttempts bitti, yine olmadı → 10 saniye bekle, tekrar tur başlat
+                        if (!success && !bound) {
+                            log.warn("[RECOVER] all {} attempts failed. waiting 10s then retry batch...", maxAttempts);
+                            try { Thread.sleep(10_000); } catch (InterruptedException ignored) {}
+                        }
+                    }
+                } finally {
+                    synchronized (reconnectLock) {
+                        recovering = false;
+                    }
+                }
+            }, "smpp-recover-thread").start();
         }
 
 
-        private static boolean hasUdhi(byte esmClass) {
-            return (esmClass & 0x40) != 0; // UDHI bit
-        }
 
-        private static byte[] stripUdhIfPresent(byte[] raw, byte esmClass) {
-            if (raw == null) return new byte[0];
-            if (!hasUdhi(esmClass)) return raw;
-            if (raw.length == 0) return raw;
-
-            int udhLen = raw[0] & 0xFF;           // UDHL (header length, excluding UDHL byte)
-            int start = 1 + udhLen;              // UDHL byte + header bytes
-            if (start < 0 || start > raw.length) return raw; // güvenlik
-            return Arrays.copyOfRange(raw, start, raw.length);
-        }
 
         private static String bytesToHex(byte[] b) {
             if (b == null) return "";
@@ -581,6 +669,18 @@
             }
         }
     }
+
+
+        private Pdu awaitResponse(String op, int seq, CompletableFuture<Pdu> f) throws Exception {
+            try {
+                return f.get(cfg.getResponseTimeoutMs(), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException te) {
+                pending.fail(seq, te);
+                log.warn("[{}] TIMEOUT waiting response seq={}", op, seq);
+
+                throw te;
+            }
+        }
 
 
         @Override

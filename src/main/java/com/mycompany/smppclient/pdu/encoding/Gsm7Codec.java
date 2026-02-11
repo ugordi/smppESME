@@ -1,37 +1,14 @@
 package com.mycompany.smppclient.pdu.encoding;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-
 
 public final class Gsm7Codec {
-
     private Gsm7Codec() {}
 
-    public static final class Encoded {
-        public final byte[] packed;
-        public final int septetCount;
-
-        public Encoded(byte[] packed, int septetCount) {
-            this.packed = packed;
-            this.septetCount = septetCount;
-        }
-    }
-
-    public static Encoded encodeTurkishSingleShift(String text) {
-        int[] septets = encodeTurkishSingleShiftSeptets(text);
-        byte[] packed = SeptetPacker.pack(septets);
-        return new Encoded(packed, septets.length);
-    }
-
-    public static byte[] encodeTurkishSingleShiftBytes(String text) {
-        return encodeTurkishSingleShift(text).packed;
-    }
-
-    public static int[] encodeTurkishSingleShiftSeptets(String text) {
-        if (text == null) return new int[0];
+    /** text -> septets (ESC dahil) */
+    public static int[] encodeToSeptets(String text) {
+        if (text == null || text.isEmpty()) return new int[0];
 
         List<Integer> out = new ArrayList<>(text.length() * 2);
 
@@ -40,131 +17,74 @@ public final class Gsm7Codec {
 
             Integer d = Gsm7Tables.DEFAULT_CHAR_TO_SEPTET.get(ch);
             if (d != null) {
-                out.add(d);
+                out.add(d & 0x7F);
                 continue;
             }
 
-            Integer trCode = Gsm7Tables.TR_SINGLE_SHIFT_CHAR_TO_CODE.get(ch);
-            if (trCode != null) {
-                out.add(Gsm7Tables.ESC);
-                out.add(trCode);
+            Integer tr = Gsm7Tables.TR_CHAR_TO_CODE.get(ch);
+            if (tr != null) {
+                out.add(Gsm7Tables.ESC);   // 0x1B
+                out.add(tr & 0x7F);
                 continue;
             }
 
-            Integer q = Gsm7Tables.DEFAULT_CHAR_TO_SEPTET.get('?');
-            if (q == null) {
-                out.add(0x3F);
-            } else {
-                out.add(q);
-            }
+            out.add(0x3F); // '?'
         }
 
         int[] septets = new int[out.size()];
-        for (int i = 0; i < out.size(); i++) septets[i] = out.get(i) & 0x7F;
+        for (int i = 0; i < out.size(); i++) septets[i] = out.get(i);
         return septets;
     }
 
-    public static String decodeTurkishSingleShiftFromSeptets(int[] septets) {
-        if (septets == null || septets.length == 0) return "";
+    // ---------------- UNPACKED ----------------
 
-        StringBuilder sb = new StringBuilder(septets.length);
-
-        Map<Integer, Character> def = Gsm7Tables.DEFAULT_SEPTET_TO_CHAR;
-        Map<Integer, Character> tr = Gsm7Tables.TR_SINGLE_SHIFT_CODE_TO_CHAR;
-
+    /** text -> 1 byte = 1 septet (ESC dahil) */
+    public static byte[] encodeUnpacked(String text) {
+        int[] septets = encodeToSeptets(text);
+        byte[] out = new byte[septets.length];
         for (int i = 0; i < septets.length; i++) {
-            int s = septets[i] & 0x7F;
+            out[i] = (byte) (septets[i] & 0x7F);
+        }
+        return out;
+    }
+
+    /** unpacked bytes -> text (ESC handling) */
+    public static String decodeUnpacked(byte[] unpacked) {
+        if (unpacked == null || unpacked.length == 0) return "";
+
+        StringBuilder sb = new StringBuilder(unpacked.length);
+
+        for (int i = 0; i < unpacked.length; i++) {
+            int s = unpacked[i] & 0x7F;
 
             if (s == Gsm7Tables.ESC) {
-                if (i + 1 < septets.length) {
-                    int code = septets[++i] & 0x7F;
-                    Character tch = tr.get(code);
-                    if (tch != null) sb.append(tch);
-                    else sb.append('?');
-                } else {
-                    sb.append('?');
-                }
+                if (i + 1 >= unpacked.length) { sb.append('?'); break; }
+                int code = unpacked[++i] & 0x7F;
+                Character trCh = Gsm7Tables.TR_CODE_TO_CHAR.get(code);
+                sb.append(trCh != null ? trCh : '?');
                 continue;
             }
 
-            Character c = def.get(s);
-            sb.append(c != null ? c : '?');
+            Character ch = Gsm7Tables.DEFAULT_SEPTET_TO_CHAR.get(s);
+            sb.append(ch != null ? ch : '?');
         }
 
         return sb.toString();
     }
 
-    public static String decodeTurkishSingleShiftFromPacked(byte[] packed) {
-        if (packed == null || packed.length == 0) return "";
+    public static byte[] prependUdh(String text) {
+        // 1) UDH
+        byte[] udh = new byte[] { 0x03, 0x24, 0x01, 0x01 };
 
-        int septetCount = (packed.length * 8) / 7;
+        // 2) Metni unpacked olarak encode et
+        byte[] body = Gsm7Codec.encodeUnpacked(text);
 
-        int[] septets = SeptetPacker.unpack(packed, septetCount);
-        String decoded = decodeTurkishSingleShiftFromSeptets(septets);
+        // 3) UDH + mesajı birleştir
+        byte[] all = new byte[udh.length + body.length];
+        System.arraycopy(udh, 0, all, 0, udh.length);
+        System.arraycopy(body, 0, all, udh.length, body.length);
 
-
-        int end = decoded.length();
-        while (end > 0 && decoded.charAt(end - 1) == '@') end--;
-        return decoded.substring(0, end);
-    }
-
-
-    public static String decodeTurkishSingleShiftFromBytes(byte[] data) {
-        if (data == null || data.length == 0) return "";
-
-        // Byte dizisini int[] septet dizisine çevir (packing yapmadan)
-        int[] septets = new int[data.length];
-        for (int i = 0; i < data.length; i++) {
-            septets[i] = data[i] & 0x7F;
-        }
-
-
-        return decodeTurkishSingleShiftFromSeptets(septets);
-    }
-
-    public static String decodeWithUdh(byte[] fullData, int udhLengthBytes) {
-        // 1. Septetleri aç (Unpack)
-        // 7-bit dünyasında UDH dahil her şey septet olarak görülür
-        int totalSeptets = (fullData.length * 8) / 7;
-        int[] allSeptets = SeptetPacker.unpack(fullData, totalSeptets);
-
-        // 2. UDH'ın kaç septet kapladığını hesapla
-        // Header Length + 1 (UDHL byte'ı)
-        int udhSeptets = (int) Math.ceil(((double) udhLengthBytes) * 8 / 7);
-
-        // 3. Mesaj gövdesini al (UDH septetlerini atla)
-        int[] bodySeptets = Arrays.copyOfRange(allSeptets, udhSeptets, allSeptets.length);
-
-        return decodeTurkishSingleShiftFromSeptets(bodySeptets);
-    }
-
-    public static byte[] manualPackWithUdh(byte[] udh, int[] septets) {
-        // 1. Önce UDH'ı yerleştir
-        // UDH 4 byte ise metin 35. bitten başlamalı (3 bit padding)
-        int bitPos = (udh.length * 8) + 3;
-
-        // Toplam byte uzunluğunu hesapla (32 bit UDH + 3 bit pad + metin bitleri)
-        int totalBits = bitPos + (septets.length * 7);
-        byte[] out = new byte[(totalBits + 7) / 8];
-
-        // UDH'ı direkt kopyala
-        System.arraycopy(udh, 0, out, 0, udh.length);
-
-        // Metni (septetleri) 3 bit kaydırarak yerleştir
-        for (int s : septets) {
-            int septet = s & 0x7F;
-            int byteIndex = bitPos / 8;
-            int shift = bitPos % 8;
-
-            out[byteIndex] |= (byte) ((septet << shift) & 0xFF);
-            if (shift > 1) { // Eğer septet bir sonraki byte'a taşıyorsa
-                if (byteIndex + 1 < out.length) {
-                    out[byteIndex + 1] |= (byte) ((septet >> (8 - shift)) & 0xFF);
-                }
-            }
-            bitPos += 7;
-        }
-        return out;
+        return all;
     }
 
 }
