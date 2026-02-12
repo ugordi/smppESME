@@ -22,6 +22,7 @@ public class SmppMainRunner {
         SmppSocketConfig sockCfg = new SmppSocketConfig(5000, 5000, 3, 1000);
         BlockingQueue<DeliverSmEvent> inbox = new LinkedBlockingQueue<>();
 
+        String sessionId = "sess-" + java.util.UUID.randomUUID();
         try (SmppSocketClient socket = new SmppSocketClient(sockCfg, null)) {
 
             SmppSessionConfig cfg = new SmppSessionConfig(15000, 30000);
@@ -36,7 +37,7 @@ public class SmppMainRunner {
                     cfg,
                     inbox::offer,
                     dao,
-                    "sess-1",
+                    sessionId,
                     p.systemId
             );
 

@@ -92,4 +92,113 @@ public final class SmppDao {
             return s.replace("\\","\\\\").replace("\"","\\\"");
         }
     }
+
+    public long insertMessageFlowOnSubmit(
+            String sessionId,
+            String systemId,
+            int submitSeq,
+            String srcAddr,
+            String dstAddr,
+            int dataCoding,
+            int esmClass,
+            String submitSmHex,
+            long submitLogId
+    ) throws SQLException {
+        String sql = """
+        INSERT INTO smpp.message_flow
+          (session_id, system_id, submit_seq, src_addr, dst_addr, data_coding, esm_class, submit_sm_hex, submit_log_id)
+        VALUES
+          (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+    """;
+
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+
+            ps.setString(1, sessionId);
+            ps.setString(2, systemId);
+            ps.setInt(3, submitSeq);
+            ps.setString(4, srcAddr);
+            ps.setString(5, dstAddr);
+            ps.setInt(6, dataCoding);
+            ps.setInt(7, esmClass);
+            ps.setString(8, submitSmHex);
+            ps.setLong(9, submitLogId);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    public int updateMessageFlowOnSubmitResp(
+            String sessionId,
+            int submitSeq,
+            int respSeq,
+            int respStatus,
+            String messageId,
+            long submitRespLogId
+    ) throws SQLException {
+        String sql = """
+        UPDATE smpp.message_flow
+           SET submit_resp_seq = ?,
+               submit_resp_status = ?,
+               message_id = ?,
+               submit_resp_log_id = ?,
+               updated_at = now()
+         WHERE session_id = ?
+           AND submit_seq = ?
+    """;
+
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+
+            ps.setInt(1, respSeq);
+            ps.setInt(2, respStatus);
+            ps.setString(3, messageId);
+            ps.setLong(4, submitRespLogId);
+            ps.setString(5, sessionId);
+            ps.setInt(6, submitSeq);
+
+
+            return ps.executeUpdate();
+        }
+    }
+
+    public int updateMessageFlowOnDlr(
+            String messageId,
+            String dlrStat,
+            String dlrErr,
+            String dlrText,
+            long dlrLogId
+    ) throws SQLException {
+        String sql = """
+        UPDATE smpp.message_flow
+           SET dlr_received = true,
+               dlr_time = now(),
+               dlr_stat = ?,
+               dlr_err = ?,
+               dlr_text = ?,
+               dlr_log_id = ?,
+               updated_at = now()
+         WHERE message_id = ?
+    """;
+
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+
+            ps.setString(1, dlrStat);
+            ps.setString(2, dlrErr);
+            ps.setString(3, dlrText);
+            ps.setLong(4, dlrLogId);
+            ps.setString(5, messageId);
+
+            return ps.executeUpdate();
+        }
+    }
+
+
+
+
 }

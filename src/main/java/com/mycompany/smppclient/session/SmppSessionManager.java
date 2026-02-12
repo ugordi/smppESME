@@ -72,7 +72,7 @@
             this.dao = dao;
             this.sessionId = sessionId;
             this.systemId = systemId;
-            this.sender = new SmppSender(socket, cfg, encoder, pending, seqGen, dao);
+            this.sender = new SmppSender(socket, cfg, encoder, pending, seqGen, dao, sessionId, systemId);
 
         }
 
@@ -109,11 +109,13 @@
 
                 boolean isEnquire = (pdu instanceof EnquireLinkReq) || (pdu instanceof EnquireLinkResp);
 
+                long inLogId = -1;
+
                 if (dao != null && !isEnquire) {
                     try {
-                        dao.insertPduLog(
+                        inLogId = dao.insertPduLog(
                                 com.mycompany.smppclient.db.SmppDao.Direction.IN,
-                                pdu.getClass().getSimpleName(),  // pduType
+                                pdu.getClass().getSimpleName(),
                                 h.commandId,
                                 h.commandStatus,
                                 h.sequence,
@@ -121,12 +123,41 @@
                                 toMap(pdu)
                         );
                     } catch (Exception ex) {
-                        log.warn("fail for Enquire", ex);
+                        log.warn("DB insert (IN) failed", ex);
                     }
                 }
 
-                if (pdu instanceof DeliverSmReq) {
-                    handleDeliverSm((DeliverSmReq) pdu);
+                if (pdu instanceof SubmitSmResp ssr) {
+                    // db eşleşmesi
+                    if (dao != null) {
+                        try {
+                            int seq = ssr.getSequenceNumber(); // request seq ile aynı olmalı
+                            int n = dao.updateMessageFlowOnSubmitResp(
+                                    sessionId,
+                                    seq,                 // submit_seq
+                                    seq,                 // resp_seq
+                                    ssr.getCommandStatus(),
+                                    normalizeMessageId(ssr.getMessageId()),
+                                    inLogId
+                            );
+
+                            if (n == 0) {
+                                log.warn("submit_sm_resp update matched 0 rows! sessionId={} submit_seq={} message_id={}",
+                                        sessionId, seq, ssr.getMessageId());
+                            } else {
+                                log.info("submit_sm_resp update OK sessionId={} submit_seq={} message_id={}",
+                                        sessionId, seq, ssr.getMessageId());
+                            }
+
+                        } catch (Exception ex) {
+                            log.warn("DB update message_flow on submit_sm_resp failed", ex);
+                        }
+                    }
+                }
+
+
+                if (pdu instanceof DeliverSmReq d) {
+                    handleDeliverSm(d, inLogId);
                     return;
                 }
                 if (pdu instanceof EnquireLinkReq) {
@@ -356,7 +387,7 @@
             return sender.sendSubmitSm(req);
         }
 
-        private void handleDeliverSm(DeliverSmReq req) {
+        private void handleDeliverSm(DeliverSmReq req, long deliverLogId) {
             try {
                 // SMSC'ye ACK: DeliverSmResp
                 DeliverSmResp resp = new DeliverSmResp();
@@ -384,6 +415,25 @@
                 boolean isReceipt = byEsm || byText;
 
                 DeliveryReceipt receipt = isReceipt ? DeliveryReceiptParser.parse(text) : null;
+
+                if (dao != null && isReceipt && receipt != null) {
+                    try {
+                        String mid = normalizeMessageId(receipt.messageId);
+                        int n = dao.updateMessageFlowOnDlr(
+                                mid,
+                                receipt.stat,
+                                receipt.err,
+                                text,
+                                deliverLogId
+                        );
+
+                        if (n == 0) {
+                            log.warn("DLR update matched 0 rows! messageId(raw)={} messageId(norm)={}", receipt.messageId, mid);
+                        }
+                    } catch (Exception ex) {
+                        log.warn("DB update message_flow on DLR failed", ex);
+                    }
+                }
 
                 log.info("[DLR CHECK] esm=0x{} byEsm={} byText={} isReceipt={}",
                         String.format("%02X", req.getEsmClass()),
@@ -682,6 +732,21 @@
             }
         }
 
+
+        private static String normalizeMessageId(String s) {
+            if (s == null) return null;
+            s = s.trim();
+
+            // çok basit normalize:
+            // 1) tırnak/boşluk temizle
+            s = s.replace("\"", "").trim();
+
+            // 2) sadece rakamsa baştaki 0'ları kırp
+            if (s.matches("\\d+")) {
+                s = s.replaceFirst("^0+(?!$)", "");
+            }
+            return s;
+        }
 
         @Override
         public void close() {
