@@ -28,7 +28,6 @@ public class SmppMainRunner {
         Db db = new Db(p.dbUrl, p.dbUser, p.dbPass);
         SmppDao dao = new SmppDao(db);
 
-        // ---- 1 hesap (aynı host/port/system ile 2 session açacaksın) ----
         SmppDao.SmscAccount a1 = dao.loadSmscAccountByName("smscdef");
         if (a1 == null) throw new RuntimeException("DB’de smpp.smsc_account name='smscdef' yok / pasif");
 

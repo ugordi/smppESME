@@ -50,6 +50,10 @@
         private String systemId;
 
 
+        private final java.util.concurrent.ConcurrentHashMap<String, java.util.List<PendingDeliver>> pendingDeliverByMsgId
+                = new java.util.concurrent.ConcurrentHashMap<>();
+
+
         public SmppSessionManager(SmppSocketClient socket, SmppSessionConfig cfg) {
             this(socket, cfg, null);
         }
@@ -76,6 +80,30 @@
             this.sender = new SmppSender(socket, cfg, encoder, pending, seqGen, dao, sessionId, systemId);
 
         }
+
+        static final class PendingDeliver {
+            final String messageId;
+            final boolean isDlr;
+            final String srcAddr;
+            final String dstAddr;
+            final int dataCoding;
+            final int esmClass;
+            final String text;
+            final long deliverLogId;
+
+            PendingDeliver(String messageId, boolean isDlr, String srcAddr, String dstAddr,
+                           int dataCoding, int esmClass, String text, long deliverLogId) {
+                this.messageId = messageId;
+                this.isDlr = isDlr;
+                this.srcAddr = srcAddr;
+                this.dstAddr = dstAddr;
+                this.dataCoding = dataCoding;
+                this.esmClass = esmClass;
+                this.text = text;
+                this.deliverLogId = deliverLogId;
+            }
+        }
+
 
         public boolean isBound() { return bound; }
 
@@ -136,29 +164,63 @@
                 }
 
                 if (pdu instanceof SubmitSmResp ssr) {
-                    // db eşleşmesi
                     if (dao != null) {
                         try {
-                            int seq = ssr.getSequenceNumber(); // request seq ile aynı olmalı
-                            int n = dao.updateMessageFlowOnSubmitResp(
-                                    sessionId,
-                                    seq,                 // submit_seq
-                                    seq,                 // resp_seq
+                            int seq = ssr.getSequenceNumber();
+                            String mid = normalizeMessageId(ssr.getMessageId());
+
+                            // 1) RAM’den submit’i çek
+                            SmppSender.PendingSubmit ps = sender.consumePendingSubmit(sessionId, seq);
+                            if (ps == null) {
+                                log.warn("SubmitSmResp geldi ama pending submit yok! sessionId={} seq={} mid={}",
+                                        sessionId, seq, mid);
+                                return;
+                            }
+
+                            // 2) submit tablosuna INSERT (message_id artık belli)
+                            long submitId = dao.insertSubmitOnResp(
+                                    ps.sessionId,
+                                    ps.systemId,
+                                    ps.submitSeq,
+                                    ps.srcAddr,
+                                    ps.dstAddr,
+                                    ps.dataCoding,
+                                    ps.esmClass,
+                                    ps.submitSmHex,
                                     ssr.getCommandStatus(),
-                                    normalizeMessageId(ssr.getMessageId()),
-                                    inLogId
+                                    mid,
+                                    ps.submitLogId,
+                                    inLogId // submit_sm_resp IN pdu_log id
                             );
 
-                            if (n == 0) {
-                                log.warn("submit_sm_resp update matched 0 rows! sessionId={} submit_seq={} message_id={}",
-                                        sessionId, seq, ssr.getMessageId());
-                            } else {
-                                log.info("submit_sm_resp update OK sessionId={} submit_seq={} message_id={}",
-                                        sessionId, seq, ssr.getMessageId());
+                            log.info("SUBMIT INSERT OK submitId={} sessionId={} seq={} mid={}",
+                                    submitId, sessionId, seq, mid);
+
+                            // 3) bu message_id için daha önce deliver geldiyse flush et
+                            java.util.List<PendingDeliver> pend = pendingDeliverByMsgId.remove(mid);
+                            if (pend != null) {
+                                for (PendingDeliver d : pend) {
+                                    try {
+                                        dao.insertDeliver(
+                                                submitId,
+                                                mid,
+                                                d.isDlr,
+                                                d.srcAddr,
+                                                d.dstAddr,
+                                                d.dataCoding,
+                                                d.esmClass,
+                                                d.text,
+                                                d.deliverLogId
+                                        );
+                                    } catch (Exception ex2) {
+                                        log.warn("deliver flush insert failed mid={}", mid, ex2);
+                                    }
+                                }
+                                log.info("DELIVER FLUSH OK mid={} count={}", mid, pend.size());
                             }
 
                         } catch (Exception ex) {
-                            log.warn("DB update message_flow on submit_sm_resp failed", ex);
+                            log.warn("DB insert submit on submit_sm_resp failed", ex);
                         }
                     }
                 }
@@ -427,19 +489,44 @@
                 if (dao != null && isReceipt && receipt != null) {
                     try {
                         String mid = normalizeMessageId(receipt.messageId);
-                        int n = dao.updateMessageFlowOnDlr(
-                                mid,
-                                receipt.stat,
-                                receipt.err,
-                                text,
-                                deliverLogId
-                        );
 
-                        if (n == 0) {
-                            log.warn("DLR update matched 0 rows! messageId(raw)={} messageId(norm)={}", receipt.messageId, mid);
+                        Long submitId = dao.findSubmitIdByMessageId(mid);
+
+                        if (submitId != null) {
+                            // submit varsa direkt deliver insert
+                            dao.insertDeliver(
+                                    submitId,
+                                    mid,
+                                    true,
+                                    req.getSourceAddr(),
+                                    req.getDestinationAddr(),
+                                    req.getDataCoding() & 0xFF,
+                                    req.getEsmClass() & 0xFF,
+                                    text,
+                                    deliverLogId
+                            );
+                            log.info("DELIVER INSERT OK mid={} submitId={}", mid, submitId);
+
+                        } else {
+                            // submit yoksa RAM'de beklet
+                            pendingDeliverByMsgId
+                                    .computeIfAbsent(mid, k -> new java.util.concurrent.CopyOnWriteArrayList<>())
+                                    .add(new PendingDeliver(
+                                            mid,
+                                            true,
+                                            req.getSourceAddr(),
+                                            req.getDestinationAddr(),
+                                            req.getDataCoding() & 0xFF,
+                                            req.getEsmClass() & 0xFF,
+                                            text,
+                                            deliverLogId
+                                    ));
+
+                            log.warn("DELIVER geldi ama submit yok -> RAM pending mid={}", mid);
                         }
+
                     } catch (Exception ex) {
-                        log.warn("DB update message_flow on DLR failed", ex);
+                        log.warn("deliver insert/pending failed", ex);
                     }
                 }
 

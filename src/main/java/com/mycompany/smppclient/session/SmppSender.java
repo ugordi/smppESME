@@ -32,6 +32,8 @@ public class SmppSender {
 
     private static final Logger log = LogManager.getLogger(SmppSender.class);
 
+    private final java.util.concurrent.ConcurrentHashMap<String, PendingSubmit> pendingSubmitByKey = new java.util.concurrent.ConcurrentHashMap<>();
+
 
     public SmppSender(
             SmppSocketClient socket,
@@ -63,6 +65,39 @@ public class SmppSender {
         return v;
     }
 
+
+    static final class PendingSubmit {
+        final String sessionId;
+        final String systemId;
+        final int submitSeq;
+        final String srcAddr;
+        final String dstAddr;
+        final int dataCoding;
+        final int esmClass;
+        final String submitSmHex;
+        final long submitLogId;
+
+        PendingSubmit(String sessionId, String systemId, int submitSeq, String srcAddr, String dstAddr,
+                      int dataCoding, int esmClass, String submitSmHex, long submitLogId) {
+            this.sessionId = sessionId;
+            this.systemId = systemId;
+            this.submitSeq = submitSeq;
+            this.srcAddr = srcAddr;
+            this.dstAddr = dstAddr;
+            this.dataCoding = dataCoding;
+            this.esmClass = esmClass;
+            this.submitSmHex = submitSmHex;
+            this.submitLogId = submitLogId;
+        }
+    }
+
+    public void rememberPendingSubmit(PendingSubmit ps) {
+        pendingSubmitByKey.put(key(ps.sessionId, ps.submitSeq), ps);
+    }
+
+    public PendingSubmit consumePendingSubmit(String sessionId, int seq) {
+        return pendingSubmitByKey.remove(key(sessionId, seq));
+    }
 
     public String sendSubmitSm(SubmitSmReq req) throws Exception {
         Objects.requireNonNull(req, "req");
@@ -109,17 +144,19 @@ public class SmppSender {
                         decoded
                 );
 
-                dao.insertMessageFlowOnSubmit(
+                PendingSubmit ps = new PendingSubmit(
                         sessionId,
                         systemId,
-                        seq,                         // ✅ submit_seq kesin bu
+                        seq,
                         req.getSourceAddr(),
                         req.getDestinationAddr(),
                         req.getDataCoding() & 0xFF,
                         req.getEsmClass() & 0xFF,
-                        bytesToHex(sm),
+                        bytesToHex(sm),      // submitSmHex
                         submitLogId
                 );
+                rememberPendingSubmit(ps);
+
 
             } catch (Exception ex) {
                 log.warn("DB submit log/flow insert failed", ex);
@@ -224,6 +261,11 @@ public class SmppSender {
                 | ((b[offset + 1] & 0xFF) << 16)
                 | ((b[offset + 2] & 0xFF) << 8)
                 | (b[offset + 3] & 0xFF);
+    }
+
+
+    private static String key(String sessionId, int seq) {
+        return sessionId + "#" + seq;
     }
 
     /** Numaranın başında + varsa siler */

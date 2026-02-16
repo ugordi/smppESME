@@ -92,3 +92,60 @@ CREATE TABLE IF NOT EXISTS smpp.smsc_account (
                                                  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
+
+CREATE TABLE IF NOT EXISTS smpp.submit (
+                                           id            BIGSERIAL PRIMARY KEY,
+                                           created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    session_id    TEXT NOT NULL,
+    system_id     TEXT NOT NULL,
+
+    submit_seq    INT  NOT NULL,
+    src_addr      TEXT,
+    dst_addr      TEXT,
+    data_coding   INT,
+    esm_class     INT,
+    submit_sm_hex TEXT,
+
+    resp_status   INT NOT NULL,
+    message_id    TEXT NOT NULL UNIQUE,
+
+    submit_log_id      BIGINT REFERENCES smpp.pdu_log(id),
+    submit_resp_log_id BIGINT REFERENCES smpp.pdu_log(id)
+    );
+
+CREATE INDEX IF NOT EXISTS ix_submit_session_seq ON smpp.submit(session_id, submit_seq);
+CREATE INDEX IF NOT EXISTS ix_submit_message_id ON smpp.submit(message_id);
+
+
+CREATE TABLE IF NOT EXISTS smpp.deliver (
+                                            id          BIGSERIAL PRIMARY KEY,
+                                            created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    submit_id   BIGINT NOT NULL REFERENCES smpp.submit(id),
+    message_id  TEXT NOT NULL,          -- join kolaylığı
+    is_dlr      BOOLEAN NOT NULL DEFAULT false,
+
+    src_addr    TEXT,
+    dst_addr    TEXT,
+    data_coding INT,
+    esm_class   INT,
+    text        TEXT,
+
+    deliver_log_id BIGINT REFERENCES smpp.pdu_log(id)
+    );
+
+CREATE INDEX IF NOT EXISTS ix_deliver_submit_id ON smpp.deliver(submit_id);
+CREATE INDEX IF NOT EXISTS ix_deliver_message_id ON smpp.deliver(message_id);
+
+
+
+
+ALTER TABLE smpp.deliver
+    ALTER COLUMN message_id DROP NOT NULL;
+
+ALTER TABLE smpp.deliver
+    ALTER COLUMN submit_id DROP NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_deliver_message_id ON smpp.deliver(message_id) WHERE message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_deliver_submit_id ON smpp.deliver(submit_id) WHERE submit_id IS NOT NULL;

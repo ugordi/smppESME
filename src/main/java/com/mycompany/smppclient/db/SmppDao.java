@@ -259,4 +259,109 @@ public final class SmppDao {
         }
     }
 
+
+
+    public long insertSubmitOnResp(
+            String sessionId,
+            String systemId,
+            int submitSeq,
+            String srcAddr,
+            String dstAddr,
+            int dataCoding,
+            int esmClass,
+            String submitSmHex,
+            int respStatus,
+            String messageId,
+            long submitLogId,
+            long submitRespLogId
+    ) throws SQLException {
+
+        String sql = """
+        INSERT INTO smpp.submit
+          (session_id, system_id, submit_seq, src_addr, dst_addr, data_coding, esm_class, submit_sm_hex,
+           resp_status, message_id, submit_log_id, submit_resp_log_id)
+        VALUES
+          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+    """;
+
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+
+            ps.setString(1, sessionId);
+            ps.setString(2, systemId);
+            ps.setInt(3, submitSeq);
+            ps.setString(4, srcAddr);
+            ps.setString(5, dstAddr);
+            ps.setInt(6, dataCoding);
+            ps.setInt(7, esmClass);
+            ps.setString(8, submitSmHex);
+            ps.setInt(9, respStatus);
+            ps.setString(10, messageId);
+            ps.setLong(11, submitLogId);
+            ps.setLong(12, submitRespLogId);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    public Long findSubmitIdByMessageId(String messageId) throws SQLException {
+        String sql = "SELECT id FROM smpp.submit WHERE message_id = ? LIMIT 1";
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, messageId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    public long insertDeliver(
+            long submitId,
+            String messageId,
+            boolean isDlr,
+            String srcAddr,
+            String dstAddr,
+            int dataCoding,
+            int esmClass,
+            String text,
+            long deliverLogId
+    ) throws SQLException {
+
+        String sql = """
+        INSERT INTO smpp.deliver
+          (submit_id, message_id, is_dlr, src_addr, dst_addr, data_coding, esm_class, text, deliver_log_id)
+        VALUES
+          (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+    """;
+
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+
+            ps.setLong(1, submitId);
+            ps.setString(2, messageId);
+            ps.setBoolean(3, isDlr);
+            ps.setString(4, srcAddr);
+            ps.setString(5, dstAddr);
+            ps.setInt(6, dataCoding);
+            ps.setInt(7, esmClass);
+            ps.setString(8, text);
+            ps.setLong(9, deliverLogId);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+
+
+
+
 }
