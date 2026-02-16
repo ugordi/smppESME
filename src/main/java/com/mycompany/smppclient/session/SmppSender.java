@@ -143,37 +143,34 @@ public class SmppSender {
         return ssr.getMessageId();
     }
 
-    public List<String> sendSubmitSmSarConcat(SubmitSmReq baseReq, String text) throws Exception {
 
-        // 1) encoding (sen şu an unpacked gönderiyorsun)
-        byte[] payload;
-        int dc = baseReq.getDataCoding() & 0xFF;
 
-        if (dc == 0x00) {
-            payload = Gsm7Codec.encodeUnpacked(text);
-        } else if (dc == 0x08) {
-            payload = text.getBytes(java.nio.charset.StandardCharsets.UTF_16BE);
-        } else {
-            payload = text.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-        }
 
-        // 2) tek SMS’e sığıyorsa normal gönder
-        int maxBytesPerSeg = (dc == 0x08) ? 134 : 153;
+    public List<String> sendConcatTrSingleShiftUnpacked(SubmitSmReq baseReq, String text) throws Exception {
+        if (text == null) text = "";
 
-        if (payload.length <= maxBytesPerSeg) {
+        // UDH toplam byte = 9
+        final int maxBodyBytes = 151;
+
+        List<String> chunks = Gsm7Codec.splitTextByUnpackedSeptetBytes(text, maxBodyBytes);
+
+        // tek parça ise sadece TR single shift
+
+        if (chunks.size() <= 1) {
             SubmitSmReq one = cloneBase(baseReq);
-            one.setEsmClass((byte)0x00);
-            one.setShortMessage(payload);
-            String mid = sendSubmitSm(one);
-            return List.of(mid);
+            one.setEsmClass((byte)0x40);
+            one.setDataCoding((byte)0x00);
+
+            byte[] udhTr = new byte[] { 0x03, 0x24, 0x01, 0x01 };
+            byte[] body = Gsm7Codec.encodeUnpacked(text);
+            one.setShortMessage(Gsm7Codec.withUdh(udhTr, body));
+
+            String id = sendSubmitSm(one);
+            return java.util.List.of(id);
         }
 
-        // 3) parçala
-        List<byte[]> parts = split(payload, maxBytesPerSeg);
-        int total = parts.size();
-
-        // 4) ref num (0..65535)
-        int refNum = ThreadLocalRandom.current().nextInt(0, 0x10000);
+        int total = chunks.size();
+        int ref = java.util.concurrent.ThreadLocalRandom.current().nextInt(0, 256); // 8-bit ref
 
         List<String> ids = new ArrayList<>(total);
 
@@ -181,28 +178,19 @@ public class SmppSender {
             int seq = i + 1;
 
             SubmitSmReq seg = cloneBase(baseReq);
-            seg.setEsmClass((byte)0x00);            // UDH yok
-            seg.setShortMessage(parts.get(i));
+            seg.setEsmClass((byte)0x40);     // UDH var
+            seg.setDataCoding((byte)0x00);   // GSM7
 
-            // SAR TLV ekle
-            seg.addSarTlvs(refNum, total, seq);
+            byte[] udh = Gsm7Codec.buildUdhConcat8TrSingleShift(ref, total, seq);
+            byte[] body = Gsm7Codec.encodeUnpacked(chunks.get(i));
+
+            seg.setShortMessage(Gsm7Codec.withUdh(udh, body));
 
             String mid = sendSubmitSm(seg);
             ids.add(mid);
         }
 
         return ids;
-    }
-
-    private static List<byte[]> split(byte[] data, int chunk) {
-        List<byte[]> out = new ArrayList<>();
-        for (int off = 0; off < data.length; off += chunk) {
-            int n = Math.min(chunk, data.length - off);
-            byte[] p = new byte[n];
-            System.arraycopy(data, off, p, 0, n);
-            out.add(p);
-        }
-        return out;
     }
 
     private static SubmitSmReq cloneBase(SubmitSmReq src) {
@@ -218,6 +206,7 @@ public class SmppSender {
         r.setPriorityFlag(src.getPriorityFlag());
         r.setRegisteredDelivery(src.getRegisteredDelivery());
         r.setDataCoding(src.getDataCoding());
+        r.setEsmClass(src.getEsmClass());
         return r;
     }
 

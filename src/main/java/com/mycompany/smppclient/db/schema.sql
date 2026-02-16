@@ -75,3 +75,20 @@ CREATE INDEX IF NOT EXISTS ix_message_flow_dlr_received ON smpp.message_flow(dlr
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_message_flow_sess_submitseq
     ON smpp.message_flow(session_id, submit_seq);
+
+CREATE TABLE IF NOT EXISTS smpp.smsc_account (
+                                                 id            BIGSERIAL PRIMARY KEY,
+                                                 name          TEXT NOT NULL UNIQUE,     -- ör: "primary", "backup"
+                                                 host          TEXT NOT NULL,
+                                                 port          INT  NOT NULL,
+                                                 system_id     TEXT NOT NULL,
+                                                 password      TEXT NOT NULL,
+                                                 system_type   TEXT NOT NULL DEFAULT '',
+                                                 interface_ver INT  NOT NULL DEFAULT 0x34,  -- SMPP 3.4
+                                                 addr_ton      INT  NOT NULL DEFAULT 5,
+                                                 addr_npi      INT  NOT NULL DEFAULT 0,
+                                                 address_range TEXT NOT NULL DEFAULT '',
+                                                 is_active     BOOLEAN NOT NULL DEFAULT true,
+                                                 created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+

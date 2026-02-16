@@ -8,6 +8,7 @@
     import org.apache.logging.log4j.LogManager;
     import org.apache.logging.log4j.Logger;
 
+    import java.util.List;
     import java.util.concurrent.*;
     import java.util.concurrent.atomic.AtomicInteger;
     import java.util.Arrays;
@@ -83,6 +84,13 @@
             // dönen değer: 1 ile MAX_SEQ arasında olmalı
             return seqGen.getAndUpdate(cur -> (cur >= MAX_SEQ ? 1 : cur + 1));
         }
+
+        //wrapper
+        public List<String> sendConcatTrSingleShiftUnpacked(SubmitSmReq baseReq, String text) throws Exception {
+            if (!bound) throw new IllegalStateException("Session not bound");
+            return sender.sendConcatTrSingleShiftUnpacked(baseReq, text);
+        }
+
 
         public void onIncomingPduBytes(byte[] data) {
             String rawHex = bytesToHex(data);

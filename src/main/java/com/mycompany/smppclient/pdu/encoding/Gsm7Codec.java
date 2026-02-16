@@ -36,7 +36,7 @@ public final class Gsm7Codec {
         return septets;
     }
 
-    // ---------------- UNPACKED ----------------
+
 
     /** text -> 1 byte = 1 septet (ESC dahil) */
     public static byte[] encodeUnpacked(String text) {
@@ -72,19 +72,59 @@ public final class Gsm7Codec {
         return sb.toString();
     }
 
-    public static byte[] prependUdh(String text) {
-        // 1) UDH
-        byte[] udh = new byte[] { 0x03, 0x24, 0x01, 0x01 };
+    public static byte[] buildUdhConcat8TrSingleShift(int ref, int total, int seq) {
+        return new byte[] {
+                (byte)0x08,              // UDHL = 8
+                (byte)0x00, (byte)0x03,  // IEI=00 (8-bit concat), IEDL=03
+                (byte)(ref & 0xFF),      // RR
+                (byte)(total & 0xFF),    // TT
+                (byte)(seq & 0xFF),      // SS
+                (byte)0x24, (byte)0x01, (byte)0x01 // TR single shift: 24 01 01
+        };
+    }
 
-        // 2) Metni unpacked olarak encode et
-        byte[] body = Gsm7Codec.encodeUnpacked(text);
-
-        // 3) UDH + mesajı birleştir
-        byte[] all = new byte[udh.length + body.length];
+    public static byte[] withUdh(byte[] udh, byte[] bodyUnpacked) {
+        byte[] all = new byte[udh.length + bodyUnpacked.length];
         System.arraycopy(udh, 0, all, 0, udh.length);
-        System.arraycopy(body, 0, all, udh.length, body.length);
-
+        System.arraycopy(bodyUnpacked, 0, all, udh.length, bodyUnpacked.length);
         return all;
+    }
+
+
+
+    public static List<String> splitTextByUnpackedSeptetBytes(String text, int maxBodyBytes) {
+        List<String> parts = new ArrayList<>();
+        if (text == null || text.isEmpty()) return parts;
+
+        StringBuilder cur = new StringBuilder();
+        int curBytes = 0;
+
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+
+            // bu karakter kaç septet byte eder?
+            int addBytes;
+            if (Gsm7Tables.DEFAULT_CHAR_TO_SEPTET.containsKey(ch)) {
+                addBytes = 1;
+            } else if (Gsm7Tables.TR_CHAR_TO_CODE.containsKey(ch)) {
+                addBytes = 2; // ESC + code
+            } else {
+                addBytes = 1; // '?'
+            }
+
+            // sığmıyorsa yeni parçaya geç
+            if (curBytes + addBytes > maxBodyBytes) {
+                parts.add(cur.toString());
+                cur.setLength(0);
+                curBytes = 0;
+            }
+
+            cur.append(ch);
+            curBytes += addBytes;
+        }
+
+        if (cur.length() > 0) parts.add(cur.toString());
+        return parts;
     }
 
 }

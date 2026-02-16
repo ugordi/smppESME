@@ -77,24 +77,6 @@ public class SubmitSmReq extends Pdu {
 
     public List<OptionalParameter> getOptionalParameters() { return optionalParameters; }
 
-    public void addOptionalParameter(OptionalParameter p) {
-        this.optionalParameters.add(p);
-    }
-
-    public void addSarTlvs(int refNum, int total, int seq) {
-        // 0x020C sar_msg_ref_num -> 2 byte
-        byte[] ref = new byte[] { (byte)((refNum >> 8) & 0xFF), (byte)(refNum & 0xFF) };
-        addOptionalParameter(new OptionalParameter(0x020C, ref.length, ref));
-
-        // 0x020E sar_total_segments -> 1 byte
-        byte[] tot = new byte[] { (byte)(total & 0xFF) };
-        addOptionalParameter(new OptionalParameter(0x020E, tot.length, tot));
-
-        // 0x020F sar_segment_seqnum -> 1 byte
-        byte[] s = new byte[] { (byte)(seq & 0xFF) };
-        addOptionalParameter(new OptionalParameter(0x020F, s.length, s));
-    }
-
     @Override
     public String toString() {
         return super.toString().replace("}", "") +

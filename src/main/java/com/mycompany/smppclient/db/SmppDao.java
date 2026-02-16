@@ -199,6 +199,64 @@ public final class SmppDao {
     }
 
 
+    public static final class SmscAccount {
+        public final String name;
+        public final String host;
+        public final int port;
+        public final String systemId;
+        public final String password;
+        public final String systemType;
+        public final byte interfaceVersion;
+        public final byte addrTon;
+        public final byte addrNpi;
+        public final String addressRange;
 
+        public SmscAccount(String name, String host, int port, String systemId, String password,
+                           String systemType, byte interfaceVersion, byte addrTon, byte addrNpi, String addressRange) {
+            this.name = name;
+            this.host = host;
+            this.port = port;
+            this.systemId = systemId;
+            this.password = password;
+            this.systemType = systemType;
+            this.interfaceVersion = interfaceVersion;
+            this.addrTon = addrTon;
+            this.addrNpi = addrNpi;
+            this.addressRange = addressRange;
+        }
+    }
+
+    public SmscAccount loadSmscAccountByName(String name) throws SQLException {
+        String sql = """
+        SELECT name, host, port, system_id, password, system_type, interface_ver, addr_ton, addr_npi, address_range
+          FROM smpp.smsc_account
+         WHERE name = ?
+           AND is_active = true
+         LIMIT 1
+    """;
+
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+
+            ps.setString(1, name);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+
+                return new SmscAccount(
+                        rs.getString("name"),
+                        rs.getString("host"),
+                        rs.getInt("port"),
+                        rs.getString("system_id"),
+                        rs.getString("password"),
+                        rs.getString("system_type"),
+                        (byte) rs.getInt("interface_ver"),
+                        (byte) rs.getInt("addr_ton"),
+                        (byte) rs.getInt("addr_npi"),
+                        rs.getString("address_range")
+                );
+            }
+        }
+    }
 
 }
